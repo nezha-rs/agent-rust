@@ -1,0 +1,9 @@
+server: dashboard.test:18539
+client_secret: integration-only-secret-0123456789
+uuid: 00000000-0000-0000-0000-000000000328
+dns:
+  - 127.0.0.1:18553
+tls: true
+insecure_tls: true
+disable_auto_update: true
+report_delay: 4

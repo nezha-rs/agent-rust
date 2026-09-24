@@ -1,0 +1,14 @@
+listen_host: 127.0.0.1
+listen_port: 18538
+location: UTC
+force_auth: true
+enable_mcp: true
+agent_secret_key: integration-only-secret-0123456789
+jwt_timeout: 1
+oauth2: {}
+tsdb:
+  data_path: ""
+https:
+  listen_port: 18539
+  tls_cert_path: ../tests/localhost.crt
+  tls_key_path: ../tests/localhost.key

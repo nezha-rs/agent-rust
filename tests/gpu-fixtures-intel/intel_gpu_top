@@ -1,0 +1,7 @@
+#!/bin/sh
+if [ "$1" != "-s" ] || [ "$2" != "1000" ] || [ "$3" != "-l" ]; then
+    exit 2
+fi
+printf '%s\n' 'Freq MHz RCS/0 BCS/0' 'req act x x busy sema wait busy sema wait' '1 1 1 1 99 0 0 0 0 0' '1 1 1 1 23 0 0 42 0 0'
+sleep 30 &
+wait

@@ -1,0 +1,9 @@
+listen_host: 127.0.0.1
+listen_port: 18538
+location: UTC
+force_auth: true
+agent_secret_key: integration-only-secret-0123456789
+jwt_timeout: 1
+oauth2: {}
+tsdb:
+  data_path: ""

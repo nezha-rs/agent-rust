@@ -1,0 +1,5 @@
+#!/bin/sh
+if [ "$1" != "-q" ] || [ "$2" != "-x" ]; then
+    exit 2
+fi
+printf '%s\n' '<nvidia_smi_log><gpu><product_name>Nezha Fixture GPU</product_name><utilization><gpu_util>37 %</gpu_util></utilization><fb_memory_usage><used>1137 MiB</used><total>24564 MiB</total></fb_memory_usage></gpu></nvidia_smi_log>'

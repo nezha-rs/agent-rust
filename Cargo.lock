@@ -1195,6 +1195,7 @@ dependencies = [
  "hickory-resolver",
  "http",
  "hyper-util",
+ "indexmap 1.9.3",
  "libc",
  "md5",
  "portable-pty",
@@ -2236,8 +2237,6 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "surge-ping"
 version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cdc709585dead30bc08dafb5b25fee3d1a9d5e81e4eff43e21f609476b64a50"
 dependencies = [
  "hex",
  "parking_lot",

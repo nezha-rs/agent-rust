@@ -56,8 +56,17 @@ Release 配置启用 `opt-level=z`、fat LTO、单 codegen unit、符号剥离�
 | --- | --- | ---: |
 | `x86_64-unknown-linux-gnu`（WSL） | `target/release/nezha-agent-rust` | 4,415,080 字节（4.21 MiB） |
 | `x86_64-pc-windows-msvc` | `target/x86_64-pc-windows-msvc/release/nezha-agent-rust.exe` | 3,225,600 字节（3.08 MiB） |
+| `powerpc-unknown-linux-musl`（静态链接） | `target/powerpc-unknown-linux-musl/release/nezha-agent-rust` | 4,194,336 字节（4.00 MiB） |
 
 CI 所用工具链和链接器不同，产物大小可能变化。
+
+PowerPC 静态版使用 WSL、nightly Rust（含 `rust-src`）和 Zig 0.13 构建：
+
+```sh
+ZIG=/path/to/zig bash scripts/build-powerpc-musl.sh
+```
+
+该产物为 32 位大端 PowerPC ELF，无动态装载器和共享库依赖；已在 WSL 中用 QEMU 用户态执行 `--version` 和 `--help`。QEMU 使用宿主内核，尚不能证明它在目标 Fedora 16 / Linux 2.6.32 和 APM867xx 实机上可运行。
 
 ## 使用与配置
 

@@ -77,7 +77,7 @@ arm_arch() {
         armv7*:*|armv8l:*|*:armv7*:*|*:arm_cortex-a*:*|*:*:7|*:*:8)
             features=$(sed -n 's/^[Ff]eatures[[:space:]]*:[[:space:]]*//p' "${NZ_CPUINFO_PATH:-/proc/cpuinfo}" 2>/dev/null | head -n 1)
             case " $features :$ABI" in
-                *' vfp '*:*hf*|*' vfpv3 '*:*hf*|*' vfpv4 '*:*hf*) printf 'armv7_hardfloat\n' ;;
+                *' vfp '*:*hf*|*' vfpv3 '*:*hf*|*' vfpv4 '*:*hf*|*' vfp '*:*vfp*|*' vfpv3 '*:*vfp*) printf 'armv7_hardfloat\n' ;;
                 *) printf 'armv7_softfloat\n' ;;
             esac ;;
         *:*:6) printf 'armv6\n' ;;

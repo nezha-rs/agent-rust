@@ -45,6 +45,8 @@ export NZ_CPUINFO_PATH
 printf 'CPU architecture\t: 7\nFeatures\t: half thumb vfp\n' > "$fixture/cpuinfo"
 ABI=armhf
 [ "$(arm_arch)" = armv7_hardfloat ]
+ABI=arm_cortex-a9_vfpv3
+[ "$(arm_arch)" = armv7_hardfloat ]
 
 CONFIG_DIR="$fixture/config"
 NZ_BUSYBOX_RCS_PATH="$fixture/rcS"

@@ -1242,7 +1242,12 @@ install_agent() {
     download_rust_asset
 
     run_as_root mkdir -p "$NZ_AGENT_PATH" || die "Could not create $NZ_AGENT_PATH."
-    if [ "$NZ_FORCE_VOLATILE" = 1 ] || ! has_free_space "$NZ_AGENT_PATH" "$ASSET_SIZE"; then
+    # The Rust binary's `service install` command manages systemd only. Use the
+    # installer-managed runner for legacy init systems instead of failing after
+    # the binary has already been downloaded and copied into place.
+    KEEPALIVE_METHOD="$(detect_keepalive_method || true)"
+    if [ "$NZ_FORCE_VOLATILE" = 1 ] || [ "$KEEPALIVE_METHOD" != systemd ] || \
+        ! has_free_space "$NZ_AGENT_PATH" "$ASSET_SIZE"; then
         install_volatile_agent
         return 0
     fi

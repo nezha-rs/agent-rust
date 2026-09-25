@@ -1269,16 +1269,31 @@ install_agent() {
     run_as_root "$target_binary" service -c "$path" uninstall >/dev/null 2>&1 || true
 
     info "Installing service with config: $path"
-    if ! run_as_root env \
-        "NZ_UUID=${NZ_UUID:-}" \
-        "NZ_SERVER=$NZ_SERVER" \
-        "NZ_CLIENT_SECRET=$NZ_CLIENT_SECRET" \
-        "NZ_TLS=${NZ_TLS:-false}" \
-        "NZ_DISABLE_AUTO_UPDATE=${NZ_DISABLE_AUTO_UPDATE:-true}" \
-        "NZ_DISABLE_FORCE_UPDATE=${NZ_DISABLE_FORCE_UPDATE:-${DISABLE_FORCE_UPDATE:-false}}" \
-        "NZ_DISABLE_COMMAND_EXECUTE=${NZ_DISABLE_COMMAND_EXECUTE:-false}" \
-        "NZ_SKIP_CONNECTION_COUNT=${NZ_SKIP_CONNECTION_COUNT:-false}" \
-        "$target_binary" service -c "$path" install >> "$LOG_FILE" 2>&1; then
+    install_service() {
+        if [ -n "${NZ_UUID:-}" ]; then
+            run_as_root env \
+                "NZ_UUID=$NZ_UUID" \
+                "NZ_SERVER=$NZ_SERVER" \
+                "NZ_CLIENT_SECRET=$NZ_CLIENT_SECRET" \
+                "NZ_TLS=${NZ_TLS:-false}" \
+                "NZ_DISABLE_AUTO_UPDATE=${NZ_DISABLE_AUTO_UPDATE:-true}" \
+                "NZ_DISABLE_FORCE_UPDATE=${NZ_DISABLE_FORCE_UPDATE:-${DISABLE_FORCE_UPDATE:-false}}" \
+                "NZ_DISABLE_COMMAND_EXECUTE=${NZ_DISABLE_COMMAND_EXECUTE:-false}" \
+                "NZ_SKIP_CONNECTION_COUNT=${NZ_SKIP_CONNECTION_COUNT:-false}" \
+                "$target_binary" service -c "$path" install
+        else
+            run_as_root env \
+                "NZ_SERVER=$NZ_SERVER" \
+                "NZ_CLIENT_SECRET=$NZ_CLIENT_SECRET" \
+                "NZ_TLS=${NZ_TLS:-false}" \
+                "NZ_DISABLE_AUTO_UPDATE=${NZ_DISABLE_AUTO_UPDATE:-true}" \
+                "NZ_DISABLE_FORCE_UPDATE=${NZ_DISABLE_FORCE_UPDATE:-${DISABLE_FORCE_UPDATE:-false}}" \
+                "NZ_DISABLE_COMMAND_EXECUTE=${NZ_DISABLE_COMMAND_EXECUTE:-false}" \
+                "NZ_SKIP_CONNECTION_COUNT=${NZ_SKIP_CONNECTION_COUNT:-false}" \
+                "$target_binary" service -c "$path" install
+        fi
+    }
+    if ! install_service >> "$LOG_FILE" 2>&1; then
         run_as_root "$target_binary" service -c "$path" uninstall >/dev/null 2>&1 || true
         if run_as_root test -f "$backup_binary"; then
             run_as_root cp -f "$backup_binary" "$target_binary" || true

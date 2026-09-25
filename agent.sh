@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 
-# Nezha Agent v2.3.5 repacked installer.
-# Supports Linux, FreeBSD and macOS binaries published by nezha-rs/agent.
+# Nezha Agent Rust v2.1.0 installer.
+# Installs Linux and OpenBSD binaries published by nezha-rs/agent-rust.
 
 NZ_BASE_PATH="${NZ_BASE_PATH:-/opt/nezha-rust}"
 NZ_AGENT_PATH="${NZ_AGENT_PATH:-${NZ_BASE_PATH}/agent}"
@@ -17,6 +17,7 @@ NZ_VOLATILE_CONFIG_DIR="${NZ_VOLATILE_CONFIG_DIR:-/etc/nezha-agent}"
 NZ_VOLATILE_RUNTIME_DIR="${NZ_VOLATILE_RUNTIME_DIR:-/tmp/nezha-agent}"
 NZ_OPENWRT_INIT_DIR="${NZ_OPENWRT_INIT_DIR:-/etc/init.d}"
 NZ_OPENWRT_RC_COMMON="${NZ_OPENWRT_RC_COMMON:-/etc/rc.common}"
+NZ_INIT_DIR="${NZ_INIT_DIR:-/etc/init.d}"
 NZ_SYSTEMD_DIR="${NZ_SYSTEMD_DIR:-/etc/systemd/system}"
 NZ_BUSYBOX_RCS_PATH="${NZ_BUSYBOX_RCS_PATH:-}"
 NZ_FORCE_VOLATILE="${NZ_FORCE_VOLATILE:-0}"
@@ -37,6 +38,8 @@ INSTALL_MODE="not-selected"
 INSTALL_BINARY_PATH=""
 INSTALL_CONFIG_PATH=""
 KEEPALIVE_METHOD=""
+KEEPALIVE_DIR=""
+STORAGE_MODE=""
 
 cleanup() {
     rm -f "$TEMP_BINARY"
@@ -116,14 +119,14 @@ download_to() {
         DOWNLOAD_TOOL="wget"
         rm -f "$destination"
         if [ "$NZ_INSECURE_TLS" = 1 ]; then
-            wget --no-check-certificate -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
+            wget -T "$NZ_DOWNLOAD_TIMEOUT" --no-check-certificate -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
         else
-            wget -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
+            wget -T "$NZ_DOWNLOAD_TIMEOUT" -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
         fi
         if auto_insecure_tls; then
             append_log "WARN: certificate verification failed; retrying wget without certificate verification"
             rm -f "$destination"
-            wget --no-check-certificate -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
+            wget -T "$NZ_DOWNLOAD_TIMEOUT" --no-check-certificate -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
         fi
         append_log "WARN: wget download failed; trying another available client"
     fi
@@ -131,11 +134,11 @@ download_to() {
         client_found=1
         DOWNLOAD_TOOL="uclient-fetch"
         rm -f "$destination"
-        uclient-fetch -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
+        uclient-fetch -T "$NZ_DOWNLOAD_TIMEOUT" -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
         if auto_insecure_tls; then
             append_log "WARN: certificate verification failed; retrying uclient-fetch without certificate verification"
             rm -f "$destination"
-            uclient-fetch --no-check-certificate -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
+            uclient-fetch -T "$NZ_DOWNLOAD_TIMEOUT" --no-check-certificate -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
         fi
         append_log "WARN: uclient-fetch download failed; trying BusyBox wget"
     fi
@@ -143,11 +146,11 @@ download_to() {
         client_found=1
         DOWNLOAD_TOOL="busybox wget"
         rm -f "$destination"
-        busybox wget -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
+        busybox wget -T "$NZ_DOWNLOAD_TIMEOUT" -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
         if auto_insecure_tls && busybox wget --help 2>&1 | grep -q -- '--no-check-certificate'; then
             append_log "WARN: certificate verification failed; retrying BusyBox wget without certificate verification"
             rm -f "$destination"
-            busybox wget --no-check-certificate -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
+            busybox wget -T "$NZ_DOWNLOAD_TIMEOUT" --no-check-certificate -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
         fi
     fi
     if [ "$client_found" = 0 ]; then
@@ -221,24 +224,21 @@ sanitize_file() {
     if [ ! -r "$input_file" ]; then
         return 0
     fi
-    awk -v secret="${NZ_CLIENT_SECRET:-}" -v uuid="${NZ_UUID:-}" -v bot_token="${TG_BOT_TOKEN:-}" '
+    NZ_SANITIZE_SECRET="${NZ_CLIENT_SECRET:-}" NZ_SANITIZE_UUID="${NZ_UUID:-}" \
+        NZ_SANITIZE_BOT_TOKEN="${TG_BOT_TOKEN:-}" awk '
+        function redact(line, key,    position, result) {
+            if (length(key) == 0) return line
+            result = ""
+            while ((position = index(line, key)) > 0) {
+                result = result substr(line, 1, position - 1) "***"
+                line = substr(line, position + length(key))
+            }
+            return result line
+        }
         {
-            line = $0
-            if (length(secret) > 0) {
-                while ((position = index(line, secret)) > 0) {
-                    line = substr(line, 1, position - 1) "***" substr(line, position + length(secret))
-                }
-            }
-            if (length(uuid) > 0) {
-                while ((position = index(line, uuid)) > 0) {
-                    line = substr(line, 1, position - 1) "***" substr(line, position + length(uuid))
-                }
-            }
-            if (length(bot_token) > 0) {
-                while ((position = index(line, bot_token)) > 0) {
-                    line = substr(line, 1, position - 1) "***" substr(line, position + length(bot_token))
-                }
-            }
+            line = redact($0, ENVIRON["NZ_SANITIZE_SECRET"])
+            line = redact(line, ENVIRON["NZ_SANITIZE_UUID"])
+            line = redact(line, ENVIRON["NZ_SANITIZE_BOT_TOKEN"])
             print line
         }
     ' "$input_file" | sed \
@@ -525,14 +525,13 @@ detect_platform() {
 
     case "$SYSTEM" in
         Linux) DETECTED_OS=linux ;;
-        FreeBSD) DETECTED_OS=freebsd ;;
-        Darwin) DETECTED_OS=darwin ;;
+        OpenBSD) DETECTED_OS=openbsd ;;
         *) die "Unsupported operating system: ${SYSTEM:-unknown}" ;;
     esac
 
     if [ -n "${NZ_ARCH:-}" ]; then
         case "$NZ_ARCH" in
-            amd64|386|arm5|arm6|armv7_softfloat|armv7_hardfloat|arm64|mips|mipsle|mips64|mips64le|riscv64|s390x|loong64|ppc|ppc64|ppc64le)
+            amd64|386|arm5|arm6|armv7_softfloat|armv7_hardfloat|arm64|mips|mipsle|mips64|mips64le|s390x|ppc|ppc64|ppc64le)
                 DETECTED_ARCH="$NZ_ARCH"
                 CPU_DETAILS="manual override NZ_ARCH=$NZ_ARCH"
                 ;;
@@ -585,8 +584,16 @@ detect_platform() {
                         *) die "Could not determine MIPS byte order; set NZ_ARCH=mipsle or NZ_ARCH=mips." ;;
                     esac
                     ;;
-            mips64le) DETECTED_ARCH=mips64le ;;
-            mips64) DETECTED_ARCH=mips64 ;;
+                mips64el|mips64le) DETECTED_ARCH=mips64le ;;
+                mips64eb) DETECTED_ARCH=mips64 ;;
+                mips64)
+                    mips_endian="$(detect_mips_endian 2>/dev/null || true)"
+                    case "$mips_endian" in
+                        little) DETECTED_ARCH=mips64le ;;
+                        big) DETECTED_ARCH=mips64 ;;
+                        *) die "Could not determine MIPS64 byte order; set NZ_ARCH=mips64le or NZ_ARCH=mips64." ;;
+                    esac
+                    ;;
                 ppc64le|powerpc64le) DETECTED_ARCH=ppc64le ;;
                 ppc64|powerpc64)
                     if [ "${BITS:-64}" = 32 ]; then DETECTED_ARCH=ppc; else DETECTED_ARCH=ppc64; fi
@@ -725,10 +732,9 @@ verify_download() {
 }
 
 verify_rust_download() {
-    [ -s "$TEMP_BINARY" ] || \
-        die "Downloaded Rust asset is empty."
+    [ -s "$TEMP_BINARY" ] || return 1
     header="$(od -An -tx1 -N20 "$TEMP_BINARY" 2>/dev/null | tr -d '[:space:]')"
-    case "$header" in 7f454c46*) ;; *) die "Rust asset is not an ELF executable." ;; esac
+    case "$header" in 7f454c46*) ;; *) return 1 ;; esac
     class="$(printf '%s' "$header" | cut -c9-10)"
     data="$(printf '%s' "$header" | cut -c11-12)"
     machine="$(printf '%s' "$header" | cut -c37-40)"
@@ -746,8 +752,8 @@ verify_rust_download() {
         ppc) [ "$class:$data:$machine" = 01:02:0014 ] ;;
         s390x) [ "$class:$data:$machine" = 02:02:0016 ] ;;
         *) return 1 ;;
-    esac || die "Rust ELF header does not match detected $DETECTED_ARCH."
-    chmod +x "$TEMP_BINARY" || die "Could not make the Rust asset executable."
+    esac || return 1
+    chmod +x "$TEMP_BINARY" || return 1
     version_output="$("$TEMP_BINARY" --version 2>&1)" || return 1
     case "$version_output" in
         *'nezha-agent-rust 2.1.0'*) ;;
@@ -793,7 +799,7 @@ normalize_boolean() {
     case "$value" in
         true|TRUE|True|1|yes|YES|Yes|on|ON|On) printf '%s\n' true ;;
         false|FALSE|False|0|no|NO|No|off|OFF|Off|'') printf '%s\n' false ;;
-        *) die "$name must be true or false, got: $value" ;;
+        *) err "$name must be true or false, got: $value"; return 1 ;;
     esac
 }
 
@@ -829,7 +835,66 @@ copy_root_file() {
     run_as_root chmod "$file_mode" "$destination_file" || return 1
 }
 
-write_volatile_config() {
+copy_root_file_atomic() {
+    source_file="$1"
+    destination_file="$2"
+    file_mode="$3"
+    staged_file="${destination_file}.nezha-agent-rust.$$"
+    if ! run_as_root cp -p "$source_file" "$staged_file"; then
+        run_as_root rm -f "$staged_file" || true
+        return 1
+    fi
+    if ! run_as_root chmod "$file_mode" "$staged_file" ||
+        ! run_as_root mv -f "$staged_file" "$destination_file"; then
+        run_as_root rm -f "$staged_file" || true
+        return 1
+    fi
+}
+
+assert_owned_service_file() {
+    service_file="$1"
+    expected_command="$2"
+    if run_as_root test -e "$service_file" || run_as_root test -L "$service_file"; then
+        case "$expected_command" in
+            ExecStart=*) directive='^[[:space:]]*ExecStart[[:space:]]*=' ;;
+            *'procd_set_param command '*) directive='^[[:space:]]*procd_set_param[[:space:]]+command[[:space:]]+' ;;
+            command=*) directive='^[[:space:]]*command[[:space:]]*=' ;;
+            SUPERVISOR=*) directive='^[[:space:]]*SUPERVISOR[[:space:]]*=' ;;
+            *) die "Unsupported service ownership check: $service_file" ;;
+        esac
+        run_as_root test -f "$service_file" && ! run_as_root test -L "$service_file" &&
+            run_as_root awk -v expected="$expected_command" -v directive="$directive" '
+                $0 == expected { matching++ }
+                $0 ~ directive { commands++ }
+                END { exit !(matching == 1 && commands == 1) }
+            ' "$service_file" ||
+            die "Existing service is not managed by this installer: $service_file"
+    fi
+}
+
+systemd_quote_path() {
+    printf '"%s"' "$(printf '%s' "$1" | sed 's/%/%%/g; s/\\/\\\\/g; s/"/\\"/g')"
+}
+
+persistent_unit_command() {
+    printf 'ExecStart=%s -c %s\n' \
+        "$(systemd_quote_path "$NZ_AGENT_PATH/nezha-agent")" \
+        "$(systemd_quote_path "${1:-$NZ_AGENT_PATH/config.yml}")"
+}
+
+persistent_unit_path() {
+    printf '/etc/systemd/system/%s\n' "$1"
+}
+
+validate_config_booleans() {
+    TLS_VALUE="$(normalize_boolean "${NZ_TLS:-false}" NZ_TLS)" || die "Invalid NZ_TLS value."
+    DISABLE_AUTO_UPDATE_VALUE="$(normalize_boolean "${NZ_DISABLE_AUTO_UPDATE:-true}" NZ_DISABLE_AUTO_UPDATE)" || die "Invalid NZ_DISABLE_AUTO_UPDATE value."
+    DISABLE_FORCE_UPDATE_VALUE="$(normalize_boolean "${NZ_DISABLE_FORCE_UPDATE:-${DISABLE_FORCE_UPDATE:-false}}" NZ_DISABLE_FORCE_UPDATE)" || die "Invalid NZ_DISABLE_FORCE_UPDATE value."
+    DISABLE_COMMAND_EXECUTE_VALUE="$(normalize_boolean "${NZ_DISABLE_COMMAND_EXECUTE:-false}" NZ_DISABLE_COMMAND_EXECUTE)" || die "Invalid NZ_DISABLE_COMMAND_EXECUTE value."
+    SKIP_CONNECTION_COUNT_VALUE="$(normalize_boolean "${NZ_SKIP_CONNECTION_COUNT:-false}" NZ_SKIP_CONNECTION_COUNT)" || die "Invalid NZ_SKIP_CONNECTION_COUNT value."
+}
+
+write_agent_config() {
     config_path="$1"
     config_dir="${config_path%/*}"
     [ "$config_dir" != "$config_path" ] || config_dir='.'
@@ -838,29 +903,25 @@ write_volatile_config() {
     [ -n "$uuid_value" ] || uuid_value="$(generate_uuid)"
     [ -n "$uuid_value" ] || die "Could not generate an agent UUID. Set NZ_UUID explicitly."
 
-    tls_value="$(normalize_boolean "${NZ_TLS:-false}" NZ_TLS)"
-    disable_auto_update_value="$(normalize_boolean "${NZ_DISABLE_AUTO_UPDATE:-true}" NZ_DISABLE_AUTO_UPDATE)"
-    disable_force_update_value="$(normalize_boolean "${NZ_DISABLE_FORCE_UPDATE:-${DISABLE_FORCE_UPDATE:-false}}" NZ_DISABLE_FORCE_UPDATE)"
-    disable_command_execute_value="$(normalize_boolean "${NZ_DISABLE_COMMAND_EXECUTE:-false}" NZ_DISABLE_COMMAND_EXECUTE)"
-    skip_connection_count_value="$(normalize_boolean "${NZ_SKIP_CONNECTION_COUNT:-false}" NZ_SKIP_CONNECTION_COUNT)"
+    validate_config_booleans
 
     {
         printf 'server: %s\n' "$(yaml_quote "$NZ_SERVER")"
         printf 'client_secret: %s\n' "$(yaml_quote "$NZ_CLIENT_SECRET")"
         printf 'uuid: %s\n' "$(yaml_quote "$uuid_value")"
-        printf 'tls: %s\n' "$tls_value"
-        printf 'disable_auto_update: %s\n' "$disable_auto_update_value"
-        printf 'disable_force_update: %s\n' "$disable_force_update_value"
-        printf 'disable_command_execute: %s\n' "$disable_command_execute_value"
-        printf 'skip_connection_count: %s\n' "$skip_connection_count_value"
-    } > "$config_temp" || die "Could not prepare volatile-mode configuration."
+        printf 'tls: %s\n' "$TLS_VALUE"
+        printf 'disable_auto_update: %s\n' "$DISABLE_AUTO_UPDATE_VALUE"
+        printf 'disable_force_update: %s\n' "$DISABLE_FORCE_UPDATE_VALUE"
+        printf 'disable_command_execute: %s\n' "$DISABLE_COMMAND_EXECUTE_VALUE"
+        printf 'skip_connection_count: %s\n' "$SKIP_CONNECTION_COUNT_VALUE"
+    } > "$config_temp" || die "Could not prepare agent configuration."
 
     run_as_root mkdir -p "$config_dir" || die "Could not create $config_dir."
     copy_root_file "$config_temp" "$config_path" 600 || die "Could not install $config_path."
     rm -f "$config_temp"
 }
 
-write_volatile_runtime_env() {
+write_runtime_env() {
     env_path="$1"
     env_temp="${TMPDIR:-/tmp}/nezha-agent-runtime-env.$$"
     {
@@ -868,19 +929,25 @@ write_volatile_runtime_env() {
         printf 'NZ_RUNTIME_SIZE=%s\n' "$(shell_quote "$ASSET_SIZE")"
         printf 'NZ_RUNTIME_SHA256=%s\n' "$(shell_quote "")"
         printf 'NZ_RUNTIME_FALLBACK_URL=%s\n' "$(shell_quote "${NZ_RELEASE_BASE}/${RUST_ORIGINAL_ASSET}")"
-        printf 'NZ_RUNTIME_DIR=%s\n' "$(shell_quote "$NZ_VOLATILE_RUNTIME_DIR")"
-        printf 'NZ_RUNTIME_BINARY=%s\n' "$(shell_quote "$NZ_VOLATILE_RUNTIME_DIR/nezha-agent")"
+        printf 'NZ_RUNTIME_DIR=%s\n' "$(shell_quote "${INSTALL_BINARY_PATH%/*}")"
+        printf 'NZ_RUNTIME_BINARY=%s\n' "$(shell_quote "$INSTALL_BINARY_PATH")"
         printf 'NZ_RUNTIME_CONFIG=%s\n' "$(shell_quote "$INSTALL_CONFIG_PATH")"
         printf 'NZ_RUNTIME_VERSION=%s\n' "$(shell_quote 'nezha-agent-rust 2.1.0')"
         printf 'NZ_RUNTIME_DOWNLOAD_TIMEOUT=%s\n' "$(shell_quote "$NZ_DOWNLOAD_TIMEOUT")"
         printf 'NZ_RUNTIME_INSECURE_TLS=%s\n' "$(shell_quote "$NZ_INSECURE_TLS")"
         printf 'NZ_KEEPALIVE_METHOD=%s\n' "$(shell_quote "$KEEPALIVE_METHOD")"
+        printf 'NZ_STORAGE_MODE=%s\n' "$(shell_quote "$STORAGE_MODE")"
+        if [ "$STORAGE_MODE" = volatile ]; then
+            printf "NZ_RUNTIME_ALLOW_DOWNLOAD='1'\n"
+        else
+            printf "NZ_RUNTIME_ALLOW_DOWNLOAD='0'\n"
+        fi
     } > "$env_temp" || die "Could not prepare volatile runtime metadata."
     copy_root_file "$env_temp" "$env_path" 600 || die "Could not install $env_path."
     rm -f "$env_temp"
 }
 
-write_volatile_runner() {
+write_runner() {
     runner_path="$1"
     runner_temp="${TMPDIR:-/tmp}/nezha-agent-runner.$$"
     cat > "$runner_temp" <<'RUNNEREOF'
@@ -940,39 +1007,39 @@ download_to() {
         found=1
         rm -f "$destination"
         if [ "$NZ_RUNTIME_INSECURE_TLS" = 1 ]; then
-            wget --no-check-certificate -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
+            wget -T "$NZ_RUNTIME_DOWNLOAD_TIMEOUT" --no-check-certificate -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
         else
-            wget -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
+            wget -T "$NZ_RUNTIME_DOWNLOAD_TIMEOUT" -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
         fi
         cat "$download_log" >&2
         if auto_insecure_tls "$download_log"; then
             echo 'certificate verification failed; retrying wget without certificate verification' >&2
             rm -f "$destination"
-            wget --no-check-certificate -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
+            wget -T "$NZ_RUNTIME_DOWNLOAD_TIMEOUT" --no-check-certificate -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
             cat "$download_log" >&2
         fi
     fi
     if has_cmd uclient-fetch; then
         found=1
         rm -f "$destination"
-        uclient-fetch -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
+        uclient-fetch -T "$NZ_RUNTIME_DOWNLOAD_TIMEOUT" -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
         cat "$download_log" >&2
         if auto_insecure_tls "$download_log"; then
             echo 'certificate verification failed; retrying uclient-fetch without certificate verification' >&2
             rm -f "$destination"
-            uclient-fetch --no-check-certificate -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
+            uclient-fetch -T "$NZ_RUNTIME_DOWNLOAD_TIMEOUT" --no-check-certificate -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
             cat "$download_log" >&2
         fi
     fi
     if has_cmd busybox && busybox wget --help >/dev/null 2>&1; then
         found=1
         rm -f "$destination"
-        busybox wget -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
+        busybox wget -T "$NZ_RUNTIME_DOWNLOAD_TIMEOUT" -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
         cat "$download_log" >&2
         if auto_insecure_tls "$download_log" && busybox wget --help 2>&1 | grep -q -- '--no-check-certificate'; then
             echo 'certificate verification failed; retrying BusyBox wget without certificate verification' >&2
             rm -f "$destination"
-            busybox wget --no-check-certificate -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
+            busybox wget -T "$NZ_RUNTIME_DOWNLOAD_TIMEOUT" --no-check-certificate -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
             cat "$download_log" >&2
         fi
     fi
@@ -1022,6 +1089,11 @@ ensure_binary() {
         return 0
     fi
 
+    [ "${NZ_RUNTIME_ALLOW_DOWNLOAD:-1}" = 1 ] || {
+        echo "persistent agent binary is missing or invalid: $NZ_RUNTIME_BINARY" >&2
+        return 1
+    }
+
     rm -f "$NZ_RUNTIME_BINARY"
     mkdir -p "$NZ_RUNTIME_DIR"
     ensure_space || {
@@ -1031,14 +1103,13 @@ ensure_binary() {
 
     temporary_binary="${NZ_RUNTIME_BINARY}.download.$$"
     trap 'rm -f "$temporary_binary"' EXIT HUP INT TERM
-    download_to "$NZ_RUNTIME_URL" "$temporary_binary" || {
+    if ! download_to "$NZ_RUNTIME_URL" "$temporary_binary" || ! binary_ok "$temporary_binary"; then
         rm -f "$temporary_binary"
-        download_to "$NZ_RUNTIME_FALLBACK_URL" "$temporary_binary" || return 1
-    }
-    binary_ok "$temporary_binary" || {
-        echo 'downloaded Nezha Agent failed size or runtime verification' >&2
-        return 1
-    }
+        download_to "$NZ_RUNTIME_FALLBACK_URL" "$temporary_binary" && binary_ok "$temporary_binary" || {
+            echo 'downloaded Nezha Agent failed size or runtime verification' >&2
+            return 1
+        }
+    fi
     mv -f "$temporary_binary" "$NZ_RUNTIME_BINARY"
     trap - EXIT HUP INT TERM
 }
@@ -1054,17 +1125,118 @@ RUNNEREOF
     rm -f "$runner_temp"
 }
 
-write_volatile_supervisor() {
+write_supervisor() {
     supervisor_path="$1"
     supervisor_temp="${TMPDIR:-/tmp}/nezha-agent-supervisor.$$"
-    runner_path="$NZ_VOLATILE_CONFIG_DIR/run.sh"
+    runner_path="$KEEPALIVE_DIR/run.sh"
     {
-        printf '%s\n' '#!/bin/sh' '' 'set -eu' 'child=' ''
-        printf '%s\n' "trap '[ -z \"\$child\" ] || { kill \"\$child\" 2>/dev/null || true; wait \"\$child\" 2>/dev/null || true; }; exit 0' HUP INT TERM"
+        printf '%s\n' '#!/bin/sh' '' 'set -eu' 'child=' \
+            "lock=$(shell_quote "$KEEPALIVE_DIR/supervise.lock")" \
+            "supervisor=$(shell_quote "$supervisor_path")" \
+            'supervisor_running() {' \
+            '    pid="$1"' \
+            '    case "$pid" in *[!0-9]*|"") return 1 ;; esac' \
+            '    kill -0 "$pid" 2>/dev/null || return 1' \
+            '    if [ -r "/proc/$pid/cmdline" ]; then' \
+            '        tr "\000" " " < "/proc/$pid/cmdline" | grep -Fq "$supervisor"' \
+            '    else' \
+            '        ps -p "$pid" -o args= 2>/dev/null | grep -Fq "$supervisor"' \
+            '    fi' \
+            '}' \
+            'if ! mkdir "$lock" 2>/dev/null; then' \
+            '    old_pid="$(cat "$lock/pid" 2>/dev/null || true)"' \
+            '    supervisor_running "$old_pid" && exit 0' \
+            '    recovery="${lock}.recovery"' \
+            '    mkdir "$recovery" 2>/dev/null || exit 1' \
+            '    trap '\''rmdir "$recovery" 2>/dev/null || true'\'' EXIT' \
+            '    trap "exit 1" HUP INT TERM' \
+            '    old_pid="$(cat "$lock/pid" 2>/dev/null || true)"' \
+            '    supervisor_running "$old_pid" && exit 0' \
+            '    rm -rf "$lock" || exit 1' \
+            '    mkdir "$lock" 2>/dev/null || exit 0' \
+            '    rmdir "$recovery" 2>/dev/null || true' \
+            '    trap - EXIT HUP INT TERM' \
+            'fi' \
+            'printf "%s\n" "$$" > "$lock/pid"' \
+            'finish() {' \
+            '    [ -z "$child" ] || { kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; }' \
+            '    [ "$(cat "$lock/pid" 2>/dev/null || true)" != "$$" ] || rm -rf "$lock"' \
+            '}' \
+            'trap finish EXIT' \
+            'trap "exit 0" HUP INT TERM'
         printf 'while :; do\n    %s & child=$!\n    wait "$child" || true\n    child=\n    sleep 5\ndone\n' "$(shell_quote "$runner_path")"
     } > "$supervisor_temp"
     copy_root_file "$supervisor_temp" "$supervisor_path" 700 || die "Could not install $supervisor_path."
     rm -f "$supervisor_temp"
+}
+
+supervisor_process_running() {
+    candidate_pid="$1"
+    candidate_path="$2"
+    case "$candidate_pid" in *[!0-9]*|'') return 1 ;; esac
+    run_as_root kill -0 "$candidate_pid" 2>/dev/null || return 1
+    if run_as_root test -r "/proc/$candidate_pid/cmdline"; then
+        run_as_root cat "/proc/$candidate_pid/cmdline" |
+            tr '\000' ' ' | grep -Fq "$candidate_path"
+    else
+        run_as_root ps -p "$candidate_pid" -o args= 2>/dev/null |
+            grep -Fq "$candidate_path"
+    fi
+}
+
+stop_supervisor() {
+    lock="$KEEPALIVE_DIR/supervise.lock"
+    if [ ! -f "$lock/pid" ]; then
+        legacy_script="$KEEPALIVE_DIR/supervise.sh"
+        if run_as_root test -f "$legacy_script" &&
+            ! run_as_root grep -Fq 'supervise.lock' "$legacy_script"; then
+            process_list="$(run_as_root ps -eo pid=,args= 2>/dev/null)" ||
+                process_list="$(run_as_root ps -o pid,args 2>/dev/null)" || return 1
+            legacy_pids="$(printf '%s\n' "$process_list" |
+                NZ_SUPERVISOR_PATH="$legacy_script" awk '
+                    $1 ~ /^[0-9]+$/ {
+                        path = ENVIRON["NZ_SUPERVISOR_PATH"]
+                        if (length($0) >= length(path) &&
+                            substr($0, length($0) - length(path) + 1) == path)
+                            print $1
+                    }
+                ')"
+            for legacy_pid in $legacy_pids; do
+                run_as_root kill "$legacy_pid" || return 1
+            done
+        fi
+        return 0
+    fi
+    supervisor_pid="$(run_as_root cat "$lock/pid")" || return 1
+    case "$supervisor_pid" in *[!0-9]*|'') return 1 ;; esac
+    if ! run_as_root kill -0 "$supervisor_pid" 2>/dev/null; then
+        run_as_root rm -rf "$lock"
+        return $?
+    fi
+    supervisor_process_running "$supervisor_pid" "$KEEPALIVE_DIR/supervise.sh" || return 1
+    run_as_root kill "$supervisor_pid" || return 1
+    attempts=0
+    while [ -d "$lock" ] && [ "$attempts" -lt 10 ]; do
+        sleep 1
+        attempts=$((attempts + 1))
+    done
+    [ ! -d "$lock" ]
+}
+
+start_supervisor() {
+    supervisor_path="$KEEPALIVE_DIR/supervise.sh"
+    run_as_root sh -c 'nohup "$1" >/dev/null 2>&1 &' sh "$supervisor_path" ||
+        die "Could not launch the agent supervisor."
+    attempts=0
+    while [ "$attempts" -lt 10 ]; do
+        supervisor_pid="$(run_as_root cat "$KEEPALIVE_DIR/supervise.lock/pid" 2>/dev/null || true)"
+        if supervisor_process_running "$supervisor_pid" "$supervisor_path"; then
+            return 0
+        fi
+        sleep 1
+        attempts=$((attempts + 1))
+    done
+    die "The agent supervisor did not stay running."
 }
 
 detect_keepalive_method() {
@@ -1102,9 +1274,12 @@ busybox_rcs_path() {
 install_busybox_rcs_keepalive() {
     rcs_path="$(busybox_rcs_path)"
     [ -f "$rcs_path" ] && [ ! -L "$rcs_path" ] || die "BusyBox rcS must be a regular file: $rcs_path"
-    write_volatile_supervisor "$NZ_VOLATILE_CONFIG_DIR/supervise.sh"
+    write_supervisor "$KEEPALIVE_DIR/supervise.sh"
     hook_marker='# BEGIN nezha-agent-rust boot hook'
-    if ! grep -Fq "$hook_marker" "$rcs_path"; then
+    if grep -Fq "$hook_marker" "$rcs_path"; then
+        grep -Fq "$KEEPALIVE_DIR/supervise.sh" "$rcs_path" ||
+            die "Existing BusyBox boot hook uses a different installation; uninstall it first."
+    else
         run_as_root cp -p "$rcs_path" "$rcs_path.nezha-agent-rust.bak" || die "Could not back up BusyBox rcS."
         hook_temp="${TMPDIR:-/tmp}/nezha-agent-rcs.$$"
         {
@@ -1112,16 +1287,16 @@ install_busybox_rcs_keepalive() {
             printf '%s\n' "$first"
             printf '%s\n' "$hook_marker"
             printf '( while [ ! -x %s ]; do sleep 2; done; exec %s ) >/dev/null 2>&1 &\n' \
-                "$(shell_quote "$NZ_VOLATILE_CONFIG_DIR/supervise.sh")" \
-                "$(shell_quote "$NZ_VOLATILE_CONFIG_DIR/supervise.sh")"
+                "$(shell_quote "$KEEPALIVE_DIR/supervise.sh")" \
+                "$(shell_quote "$KEEPALIVE_DIR/supervise.sh")"
             printf '%s\n' '# END nezha-agent-rust boot hook'
             cat
         } < "$rcs_path" > "$hook_temp"
-        copy_root_file "$hook_temp" "$rcs_path" 755 || die "Could not install the BusyBox rcS hook."
+        copy_root_file_atomic "$hook_temp" "$rcs_path" 755 || die "Could not install the BusyBox rcS hook."
         rm -f "$hook_temp"
     fi
     if [ "$NZ_NO_START" != 1 ]; then
-        nohup "$NZ_VOLATILE_CONFIG_DIR/supervise.sh" >/dev/null 2>&1 &
+        start_supervisor
     fi
 }
 
@@ -1135,14 +1310,15 @@ remove_busybox_rcs_hook() {
         $0 == "# END nezha-agent-rust boot hook" {skip=0; next}
         !skip {print}
     ' "$rcs_path" > "$hook_temp"
-    copy_root_file "$hook_temp" "$rcs_path" 755 || die "Could not remove the BusyBox rcS hook."
+    copy_root_file_atomic "$hook_temp" "$rcs_path" 755 || die "Could not remove the BusyBox rcS hook."
     rm -f "$hook_temp"
 }
 
 install_openwrt_keepalive() {
     service_path="$NZ_OPENWRT_INIT_DIR/nezha-agent"
     service_temp="${TMPDIR:-/tmp}/nezha-agent-openwrt.$$"
-    runner_path="$NZ_VOLATILE_CONFIG_DIR/run.sh"
+    runner_path="$KEEPALIVE_DIR/run.sh"
+    assert_owned_service_file "$service_path" "    procd_set_param command $(shell_quote "$runner_path")"
     run_as_root mkdir -p "$NZ_OPENWRT_INIT_DIR" || die "Could not create $NZ_OPENWRT_INIT_DIR."
     {
         printf '#!/bin/sh %s\n\n' "$NZ_OPENWRT_RC_COMMON"
@@ -1163,12 +1339,13 @@ install_openwrt_keepalive() {
 install_systemd_keepalive() {
     service_path="$NZ_SYSTEMD_DIR/nezha-agent.service"
     service_temp="${TMPDIR:-/tmp}/nezha-agent-systemd.$$"
-    runner_path="$NZ_VOLATILE_CONFIG_DIR/run.sh"
+    runner_path="$KEEPALIVE_DIR/run.sh"
+    assert_owned_service_file "$service_path" "ExecStart=$(systemd_quote_path "$runner_path")"
     run_as_root mkdir -p "$NZ_SYSTEMD_DIR" || die "Could not create $NZ_SYSTEMD_DIR."
     {
         printf '%s\n' '[Unit]' 'Description=Nezha monitoring agent' 'Wants=network-online.target' 'After=network-online.target' ''
         printf '%s\n' '[Service]' 'Type=simple' 'User=root'
-        printf 'ExecStart=%s\n' "$runner_path"
+        printf 'ExecStart=%s\n' "$(systemd_quote_path "$runner_path")"
         printf '%s\n' 'Restart=always' 'RestartSec=5' 'StartLimitIntervalSec=0' '' '[Install]' 'WantedBy=multi-user.target'
     } > "$service_temp"
     copy_root_file "$service_temp" "$service_path" 644 || die "Could not install $service_path."
@@ -1181,14 +1358,16 @@ install_systemd_keepalive() {
 }
 
 install_openrc_keepalive() {
-    service_path="/etc/init.d/nezha-agent"
+    service_path="$NZ_INIT_DIR/nezha-agent"
     service_temp="${TMPDIR:-/tmp}/nezha-agent-openrc.$$"
-    runner_path="$NZ_VOLATILE_CONFIG_DIR/run.sh"
+    runner_path="$KEEPALIVE_DIR/run.sh"
+    assert_owned_service_file "$service_path" "command=$(shell_quote "$runner_path")"
     {
         printf '%s\n' '#!/sbin/openrc-run' '' 'description="Nezha monitoring agent"'
         printf 'command=%s\n' "$(shell_quote "$runner_path")"
         printf '%s\n' 'command_background="no"' 'supervisor="supervise-daemon"' 'respawn_delay="5"' 'respawn_max="0"' '' 'depend() {' '    need net' '}'
     } > "$service_temp"
+    run_as_root mkdir -p "$NZ_INIT_DIR" || die "Could not create $NZ_INIT_DIR."
     copy_root_file "$service_temp" "$service_path" 755 || die "Could not install $service_path."
     rm -f "$service_temp"
     run_as_root rc-update add nezha-agent default || die "Could not enable the OpenRC nezha-agent service."
@@ -1199,34 +1378,69 @@ install_openrc_keepalive() {
 }
 
 install_sysv_keepalive() {
-    supervisor_path="$NZ_VOLATILE_CONFIG_DIR/supervise.sh"
-    write_volatile_supervisor "$supervisor_path"
-    service_path="/etc/init.d/nezha-agent"
+    supervisor_path="$KEEPALIVE_DIR/supervise.sh"
+    write_supervisor "$supervisor_path"
+    service_path="$NZ_INIT_DIR/nezha-agent"
+    assert_owned_service_file "$service_path" "SUPERVISOR=$(shell_quote "$supervisor_path")"
     service_temp="${TMPDIR:-/tmp}/nezha-agent-sysv.$$"
     {
         printf '%s\n' '#!/bin/sh' '### BEGIN INIT INFO' '# Provides: nezha-agent' '# Required-Start: $network' '# Required-Stop: $network' '# Default-Start: 2 3 4 5' '# Default-Stop: 0 1 6' '# Short-Description: Nezha monitoring agent' '### END INIT INFO' ''
-        printf 'PIDFILE=%s\n' "$(shell_quote '/var/run/nezha-agent.pid')"
+        printf 'LOCK=%s\n' "$(shell_quote "$KEEPALIVE_DIR/supervise.lock")"
         printf 'SUPERVISOR=%s\n\n' "$(shell_quote "$supervisor_path")"
-        printf '%s\n' 'start() {' '    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then return 0; fi' '    nohup "$SUPERVISOR" >/dev/null 2>&1 &' '    echo "$!" > "$PIDFILE"' '}' '' 'stop() {' '    if [ -f "$PIDFILE" ]; then kill "$(cat "$PIDFILE")" 2>/dev/null || true; rm -f "$PIDFILE"; fi' '    pkill -f /etc/nezha-agent/run.sh 2>/dev/null || true' '}' '' 'case "${1:-}" in' '    start) start ;;' '    stop) stop ;;' '    restart) stop; sleep 1; start ;;' '    *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;' 'esac'
+        printf '%s\n' 'start() {' '    nohup "$SUPERVISOR" >/dev/null 2>&1 &' '}' '' 'stop() {' '    [ -f "$LOCK/pid" ] || return 0' '    pid="$(cat "$LOCK/pid")"' '    case "$pid" in *[!0-9]*|"") return 1 ;; esac' '    kill "$pid"' '}' '' 'case "${1:-}" in' '    start) start ;;' '    stop) stop ;;' '    restart) stop; sleep 1; start ;;' '    *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;' 'esac'
     } > "$service_temp"
+    run_as_root mkdir -p "$NZ_INIT_DIR" || die "Could not create $NZ_INIT_DIR."
     copy_root_file "$service_temp" "$service_path" 755 || die "Could not install $service_path."
     rm -f "$service_temp"
     if has_cmd update-rc.d; then run_as_root update-rc.d nezha-agent defaults || die "Could not enable nezha-agent."; fi
     if has_cmd chkconfig; then run_as_root chkconfig nezha-agent on || die "Could not enable nezha-agent."; fi
-    if [ "$NZ_NO_START" != 1 ]; then run_as_root "$service_path" restart || die "Could not start nezha-agent."; fi
+    if [ "$NZ_NO_START" != 1 ]; then run_as_root "$service_path" start || die "Could not start nezha-agent."; fi
 }
 
 install_cron_keepalive() {
-    supervisor_path="$NZ_VOLATILE_CONFIG_DIR/supervise.sh"
-    write_volatile_supervisor "$supervisor_path"
+    supervisor_path="$KEEPALIVE_DIR/supervise.sh"
+    write_supervisor "$supervisor_path"
     cron_temp="${TMPDIR:-/tmp}/nezha-agent-cron.$$"
-    (crontab -l 2>/dev/null | grep -v "$supervisor_path" || true; printf '@reboot %s >/dev/null 2>&1\n' "$supervisor_path") > "$cron_temp"
-    crontab "$cron_temp" || die "Could not install the @reboot cron entry."
+    existing_cron="${cron_temp}.existing"
+    cron_error="${cron_temp}.error"
+    if ! run_as_root env LC_ALL=C crontab -l > "$existing_cron" 2> "$cron_error"; then
+        grep -Fqi 'no crontab' "$cron_error" || die "Could not read the existing root crontab."
+        : > "$existing_cron"
+    fi
+    { grep -Fv "$supervisor_path" "$existing_cron" || true; printf '@reboot %s >/dev/null 2>&1\n' "$(shell_quote "$supervisor_path")"; } > "$cron_temp"
+    run_as_root crontab "$cron_temp" || die "Could not install the @reboot cron entry."
+    rm -f "$existing_cron" "$cron_error"
     rm -f "$cron_temp"
-    if [ "$NZ_NO_START" != 1 ]; then nohup "$supervisor_path" >/dev/null 2>&1 & fi
+    if [ "$NZ_NO_START" != 1 ]; then start_supervisor; fi
 }
 
-install_volatile_keepalive() {
+remove_cron_entry() {
+    cron_owner="$1"
+    cron_temp="${TMPDIR:-/tmp}/nezha-agent-cron-remove.$$.$cron_owner"
+    if [ "$cron_owner" = root ]; then
+        run_as_root env LC_ALL=C crontab -l > "$cron_temp" 2> "${cron_temp}.error" && cron_status=0 || cron_status=$?
+    else
+        env LC_ALL=C crontab -l > "$cron_temp" 2> "${cron_temp}.error" && cron_status=0 || cron_status=$?
+    fi
+    if [ "$cron_status" -ne 0 ]; then
+        if grep -Fqi 'no crontab' "${cron_temp}.error"; then
+            rm -f "$cron_temp" "${cron_temp}.error"
+            return 0
+        fi
+        die "Could not read the $cron_owner crontab."
+    fi
+    if grep -Fq "$KEEPALIVE_DIR/supervise.sh" "$cron_temp"; then
+        grep -Fv "$KEEPALIVE_DIR/supervise.sh" "$cron_temp" > "${cron_temp}.new" || true
+        if [ "$cron_owner" = root ]; then
+            run_as_root crontab "${cron_temp}.new" || die "Could not remove root cron entry."
+        else
+            crontab "${cron_temp}.new" || die "Could not remove user cron entry."
+        fi
+    fi
+    rm -f "$cron_temp" "${cron_temp}.error" "${cron_temp}.new"
+}
+
+install_keepalive() {
     case "$KEEPALIVE_METHOD" in
         openwrt) install_openwrt_keepalive ;;
         systemd) install_systemd_keepalive ;;
@@ -1238,127 +1452,179 @@ install_volatile_keepalive() {
     esac
 }
 
-install_volatile_agent() {
-    INSTALL_MODE='volatile (/tmp, re-downloaded after reboot)'
-    INSTALL_CONFIG_PATH="$NZ_VOLATILE_CONFIG_DIR/config.yml"
-    INSTALL_BINARY_PATH="$NZ_VOLATILE_RUNTIME_DIR/nezha-agent"
-    KEEPALIVE_METHOD="$(detect_keepalive_method || true)"
-    [ -n "$KEEPALIVE_METHOD" ] || die "No supported boot-time service manager was detected for volatile mode."
+install_runner_agent() {
+    if [ "$STORAGE_MODE" = volatile ]; then
+        INSTALL_MODE='volatile (/tmp, re-downloaded after reboot)'
+        KEEPALIVE_DIR="$NZ_VOLATILE_CONFIG_DIR"
+        INSTALL_BINARY_PATH="$NZ_VOLATILE_RUNTIME_DIR/nezha-agent"
+        other_metadata="$NZ_AGENT_PATH/runtime.env"
+    else
+        INSTALL_MODE='persistent binary'
+        KEEPALIVE_DIR="$NZ_AGENT_PATH"
+        INSTALL_BINARY_PATH="$NZ_AGENT_PATH/nezha-agent"
+        other_metadata="$NZ_VOLATILE_CONFIG_DIR/runtime.env"
+    fi
+    INSTALL_CONFIG_PATH="$KEEPALIVE_DIR/config.yml"
+    [ -n "$KEEPALIVE_METHOD" ] || die "No supported boot-time service manager was detected."
+    if [ "$other_metadata" != "$KEEPALIVE_DIR/runtime.env" ] && run_as_root test -f "$other_metadata"; then
+        die "Another installation mode is present; uninstall it before changing binary storage."
+    fi
+    if [ "$KEEPALIVE_METHOD" != systemd ] && run_as_root test -e "$NZ_SYSTEMD_DIR/nezha-agent.service"; then
+        die "An existing systemd installation must be removed before changing service managers."
+    fi
+    if run_as_root test -f "$KEEPALIVE_DIR/runtime.env"; then
+        run_as_root grep -Fxq "NZ_KEEPALIVE_METHOD='$KEEPALIVE_METHOD'" \
+            "$KEEPALIVE_DIR/runtime.env" ||
+            die "Existing installation uses a different service manager; uninstall it before changing modes."
+        if [ "$STORAGE_MODE" = persistent ]; then
+            run_as_root grep -Fxq "NZ_STORAGE_MODE='persistent'" "$KEEPALIVE_DIR/runtime.env" ||
+                die "Existing installation uses volatile storage; uninstall it before changing modes."
+        elif run_as_root grep -q '^NZ_STORAGE_MODE=' "$KEEPALIVE_DIR/runtime.env"; then
+            run_as_root grep -Fxq "NZ_STORAGE_MODE='volatile'" "$KEEPALIVE_DIR/runtime.env" ||
+                die "Existing installation uses persistent storage; uninstall it before changing modes."
+        fi
+    elif [ "$STORAGE_MODE" = volatile ] && run_as_root test -f "$INSTALL_CONFIG_PATH"; then
+        die "Existing volatile configuration has no runtime metadata; refusing to replace it."
+    fi
 
-    info "Persistent storage cannot hold the binary; using volatile runtime mode."
-    info "Persistent config directory: $NZ_VOLATILE_CONFIG_DIR"
-    info "Volatile binary path: $INSTALL_BINARY_PATH"
+    case "$KEEPALIVE_METHOD" in
+        systemd) assert_owned_service_file "$NZ_SYSTEMD_DIR/nezha-agent.service" "ExecStart=$(systemd_quote_path "$KEEPALIVE_DIR/run.sh")" ;;
+        openwrt) assert_owned_service_file "$NZ_OPENWRT_INIT_DIR/nezha-agent" "    procd_set_param command $(shell_quote "$KEEPALIVE_DIR/run.sh")" ;;
+        openrc) assert_owned_service_file "$NZ_INIT_DIR/nezha-agent" "command=$(shell_quote "$KEEPALIVE_DIR/run.sh")" ;;
+        sysv) assert_owned_service_file "$NZ_INIT_DIR/nezha-agent" "SUPERVISOR=$(shell_quote "$KEEPALIVE_DIR/supervise.sh")" ;;
+    esac
+    case "$KEEPALIVE_METHOD" in
+        sysv|busybox-rcs|cron)
+            stop_supervisor || die "Could not stop the existing supervisor."
+            ;;
+    esac
+
+    info "Binary storage: $STORAGE_MODE ($INSTALL_BINARY_PATH)"
+    info "Config directory: $KEEPALIVE_DIR"
     info "Boot keepalive method: $KEEPALIVE_METHOD"
 
-    write_volatile_config "$INSTALL_CONFIG_PATH"
-    write_volatile_runtime_env "$NZ_VOLATILE_CONFIG_DIR/runtime.env"
-    write_volatile_runner "$NZ_VOLATILE_CONFIG_DIR/run.sh"
-
-    run_as_root mkdir -p "$NZ_VOLATILE_RUNTIME_DIR" || die "Could not create $NZ_VOLATILE_RUNTIME_DIR."
-    run_as_root rm -f "$INSTALL_BINARY_PATH"
-    if ! run_as_root mv -f "$TEMP_BINARY" "$INSTALL_BINARY_PATH" 2>/dev/null; then
-        run_as_root cp -f "$TEMP_BINARY" "$INSTALL_BINARY_PATH" || die "Could not install the volatile binary."
-        rm -f "$TEMP_BINARY"
+    if run_as_root test -f "$INSTALL_CONFIG_PATH"; then
+        info "Reusing existing configuration: $INSTALL_CONFIG_PATH"
+    else
+        write_agent_config "$INSTALL_CONFIG_PATH"
     fi
-    run_as_root chmod 755 "$INSTALL_BINARY_PATH" || die "Could not make the volatile binary executable."
-    install_volatile_keepalive
+    write_runtime_env "$KEEPALIVE_DIR/runtime.env"
+    write_runner "$KEEPALIVE_DIR/run.sh"
 
-    success "Nezha Agent installed in volatile runtime mode."
-    success "After each reboot, $NZ_VOLATILE_CONFIG_DIR/run.sh verifies or downloads the binary before starting it."
+    run_as_root mkdir -p "${INSTALL_BINARY_PATH%/*}" || die "Could not create binary directory."
+    if [ "$STORAGE_MODE" = persistent ] && run_as_root test -f "$INSTALL_BINARY_PATH"; then
+        run_as_root cp -f "$INSTALL_BINARY_PATH" "$NZ_AGENT_PATH/nezha-agent.backup" ||
+            die "Could not back up existing agent."
+    fi
+    copy_root_file_atomic "$TEMP_BINARY" "$INSTALL_BINARY_PATH" 755 || die "Could not install the agent binary."
+    rm -f "$TEMP_BINARY"
+    install_keepalive
+
+    success "Nezha Agent installed with $STORAGE_MODE binary storage."
+    if [ "$STORAGE_MODE" = volatile ]; then
+        success "After each reboot, $KEEPALIVE_DIR/run.sh verifies or downloads the binary before starting it."
+    fi
     notify_result success
     rm -f "$LOG_FILE"
-}
-
-choose_config_path() {
-    path="$NZ_AGENT_PATH/config.yml"
-    if [ -f "$path" ]; then
-        if [ -r /dev/urandom ] && has_cmd od; then
-            suffix="$(od -An -N3 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
-        else
-            suffix="$$"
-        fi
-        path="$NZ_AGENT_PATH/config-${suffix}.yml"
-    fi
-    printf '%s\n' "$path"
 }
 
 install_agent() {
     [ -n "${NZ_SERVER:-}" ] || die "NZ_SERVER must not be empty."
     [ -n "${NZ_CLIENT_SECRET:-}" ] || die "NZ_CLIENT_SECRET must not be empty."
+    validate_config_booleans
 
     detect_platform
     download_rust_asset
 
-    run_as_root mkdir -p "$NZ_AGENT_PATH" || die "Could not create $NZ_AGENT_PATH."
-    # The Rust binary's `service install` command manages systemd only. Use the
-    # installer-managed runner for legacy init systems instead of failing after
-    # the binary has already been downloaded and copied into place.
     KEEPALIVE_METHOD="$(detect_keepalive_method || true)"
-    if [ "$NZ_FORCE_VOLATILE" = 1 ] || [ "$KEEPALIVE_METHOD" != systemd ] || \
-        ! has_free_space "$NZ_AGENT_PATH" "$ASSET_SIZE"; then
-        install_volatile_agent
+    # The Rust binary manages systemd units; other init systems use the
+    # installer-managed runner regardless of where the binary is stored.
+    persistent_ready=1
+    if [ "$NZ_FORCE_VOLATILE" != 1 ]; then
+        run_as_root mkdir -p "$NZ_AGENT_PATH" || persistent_ready=0
+    fi
+    target_binary="$NZ_AGENT_PATH/nezha-agent"
+    required_bytes="$ASSET_SIZE"
+    if [ "$NZ_FORCE_VOLATILE" != 1 ] && [ "$persistent_ready" = 1 ] &&
+        run_as_root test -f "$target_binary"; then
+        old_size="$(run_as_root wc -c "$target_binary" 2>/dev/null | awk '{print $1}')"
+        [ -n "$old_size" ] || die "Could not determine size of the existing agent."
+        required_bytes=$((required_bytes + ${old_size:-0}))
+    fi
+    [ -n "$KEEPALIVE_METHOD" ] || die "No supported boot-time service manager was detected."
+    if [ "$NZ_FORCE_VOLATILE" = 1 ] || [ "$persistent_ready" = 0 ] ||
+        ! has_free_space "$NZ_AGENT_PATH" "$required_bytes"; then
+        STORAGE_MODE=volatile
+    else
+        STORAGE_MODE=persistent
+    fi
+    if [ "$STORAGE_MODE" = volatile ] || [ "$KEEPALIVE_METHOD" != systemd ]; then
+        install_runner_agent
         return 0
     fi
 
     INSTALL_MODE='persistent binary'
-    target_binary="$NZ_AGENT_PATH/nezha-agent"
     INSTALL_BINARY_PATH="$target_binary"
     backup_binary="$NZ_AGENT_PATH/nezha-agent.backup"
+    path="$NZ_AGENT_PATH/config.yml"
+    INSTALL_CONFIG_PATH="$path"
+    unit_path="$(persistent_unit_path nezha-agent.service)"
+    for legacy_config in "$NZ_AGENT_PATH"/config-*.yml; do
+        if run_as_root test -f "$legacy_config"; then
+            die "Legacy additional agent configuration found: $legacy_config. Uninstall the old instances before installing again."
+        fi
+    done
+    if run_as_root test -f "$NZ_VOLATILE_CONFIG_DIR/runtime.env" ||
+        run_as_root test -f "$NZ_AGENT_PATH/runtime.env"; then
+        die "An installer-managed service is already present; uninstall it before changing service managers."
+    fi
+    assert_owned_service_file "$unit_path" "$(persistent_unit_command)"
+    existing_unit=0
+    if run_as_root test -f "$unit_path"; then
+        existing_unit=1
+        run_as_root systemctl stop nezha-agent.service || die "Could not stop the existing Nezha Agent service."
+    fi
+    had_backup=0
     if run_as_root test -f "$target_binary"; then
-        run_as_root cp -f "$target_binary" "$backup_binary" || die "Could not back up existing agent."
+        if ! run_as_root cp -f "$target_binary" "$backup_binary"; then
+            [ "$existing_unit" = 0 ] || run_as_root systemctl start nezha-agent.service >/dev/null 2>&1 || true
+            die "Could not back up existing agent."
+        fi
+        had_backup=1
         info "Existing agent backed up to: $backup_binary"
     fi
-    run_as_root cp -f "$TEMP_BINARY" "$target_binary" || die "Could not install the verified binary."
-    run_as_root chmod 755 "$target_binary" || die "Could not set executable permissions."
+    if ! copy_root_file_atomic "$TEMP_BINARY" "$target_binary" 755; then
+        [ "$existing_unit" = 0 ] || run_as_root systemctl start nezha-agent.service >/dev/null 2>&1 || true
+        die "Could not install the verified binary."
+    fi
     rm -f "$TEMP_BINARY"
 
-    path="$(choose_config_path)"
-    INSTALL_CONFIG_PATH="$path"
     if ! run_as_root test -f "$path"; then
         info "Creating config with supplied server credentials: $path"
-        write_volatile_config "$path"
-    fi
-    run_as_root "$target_binary" service -c "$path" uninstall >/dev/null 2>&1 || true
-
-    info "Installing service with config: $path"
-    install_service() {
-        if [ -n "${NZ_UUID:-}" ]; then
-            run_as_root env \
-                "NZ_UUID=$NZ_UUID" \
-                "NZ_SERVER=$NZ_SERVER" \
-                "NZ_CLIENT_SECRET=$NZ_CLIENT_SECRET" \
-                "NZ_TLS=${NZ_TLS:-false}" \
-                "NZ_DISABLE_AUTO_UPDATE=${NZ_DISABLE_AUTO_UPDATE:-true}" \
-                "NZ_DISABLE_FORCE_UPDATE=${NZ_DISABLE_FORCE_UPDATE:-${DISABLE_FORCE_UPDATE:-false}}" \
-                "NZ_DISABLE_COMMAND_EXECUTE=${NZ_DISABLE_COMMAND_EXECUTE:-false}" \
-                "NZ_SKIP_CONNECTION_COUNT=${NZ_SKIP_CONNECTION_COUNT:-false}" \
-                "$target_binary" service -c "$path" install
-        else
-            run_as_root env \
-                "NZ_SERVER=$NZ_SERVER" \
-                "NZ_CLIENT_SECRET=$NZ_CLIENT_SECRET" \
-                "NZ_TLS=${NZ_TLS:-false}" \
-                "NZ_DISABLE_AUTO_UPDATE=${NZ_DISABLE_AUTO_UPDATE:-true}" \
-                "NZ_DISABLE_FORCE_UPDATE=${NZ_DISABLE_FORCE_UPDATE:-${DISABLE_FORCE_UPDATE:-false}}" \
-                "NZ_DISABLE_COMMAND_EXECUTE=${NZ_DISABLE_COMMAND_EXECUTE:-false}" \
-                "NZ_SKIP_CONNECTION_COUNT=${NZ_SKIP_CONNECTION_COUNT:-false}" \
-                "$target_binary" service -c "$path" install
-        fi
-    }
-    if ! install_service >> "$LOG_FILE" 2>&1; then
-        run_as_root "$target_binary" service -c "$path" uninstall >/dev/null 2>&1 || true
-        if run_as_root test -f "$backup_binary"; then
-            run_as_root cp -f "$backup_binary" "$target_binary" || true
-        fi
-        die "Nezha Agent service installation failed. See the log included in the Telegram notification."
+        write_agent_config "$path"
+    else
+        info "Reusing existing configuration: $path"
     fi
 
-    # `service install` creates and enables the systemd unit but does not start it.
-    if ! run_as_root "$target_binary" service -c "$path" start >> "$LOG_FILE" 2>&1; then
-        run_as_root "$target_binary" service -c "$path" uninstall >/dev/null 2>&1 || true
-        if run_as_root test -f "$backup_binary"; then
-            run_as_root cp -f "$backup_binary" "$target_binary" || true
+    if [ "$existing_unit" = 0 ]; then
+        info "Installing service with config: $path"
+        if ! run_as_root env -i "PATH=$PATH" \
+            "$target_binary" service -c "$path" install >> "$LOG_FILE" 2>&1; then
+            if [ "$had_backup" = 1 ]; then
+                copy_root_file_atomic "$backup_binary" "$target_binary" 755 || true
+            fi
+            die "Nezha Agent service installation failed. See the log included in the Telegram notification."
         fi
+    fi
+
+    if [ "$NZ_NO_START" != 1 ] && ! run_as_root systemctl start nezha-agent.service >> "$LOG_FILE" 2>&1; then
+        if [ "$existing_unit" = 0 ]; then
+            run_as_root "$target_binary" service -c "$path" uninstall >/dev/null 2>&1 || true
+        fi
+        if [ "$had_backup" = 1 ]; then
+            copy_root_file_atomic "$backup_binary" "$target_binary" 755 || true
+        fi
+        [ "$existing_unit" = 0 ] || run_as_root systemctl start nezha-agent.service >/dev/null 2>&1 || true
         die "Nezha Agent service start failed. See the log included in the Telegram notification."
     fi
 
@@ -1456,14 +1722,134 @@ ${output_for_message}"
     return "$command_status"
 }
 
+persistent_unit_name() {
+    config_file="$1"
+    if [ "$config_file" = "$NZ_AGENT_PATH/config.yml" ]; then
+        printf '%s\n' nezha-agent.service
+        return 0
+    fi
+    if has_cmd md5sum; then
+        digest="$(printf '%s' "$config_file" | md5sum | awk '{print $1}')"
+    elif has_cmd busybox && busybox md5sum --help >/dev/null 2>&1; then
+        digest="$(printf '%s' "$config_file" | busybox md5sum | awk '{print $1}')"
+    elif has_cmd openssl; then
+        digest="$(printf '%s' "$config_file" | openssl dgst -md5 | sed 's/^.*= //')"
+    else
+        return 1
+    fi
+    [ -n "$digest" ] || return 1
+    printf 'nezha-agent-%s.service\n' "$(printf '%s' "$digest" | cut -c 1-7)"
+}
+
+uninstall_runner_agent() {
+    metadata="$KEEPALIVE_DIR/runtime.env"
+    run_as_root test -f "$metadata" || return 1
+    if [ "$STORAGE_MODE" = persistent ]; then
+        run_as_root grep -Fxq "NZ_STORAGE_MODE='persistent'" "$metadata" ||
+            die "Persistent installation metadata is inconsistent."
+    elif run_as_root grep -q '^NZ_STORAGE_MODE=' "$metadata"; then
+        run_as_root grep -Fxq "NZ_STORAGE_MODE='volatile'" "$metadata" ||
+            die "Volatile installation metadata is inconsistent."
+    fi
+    method=''
+    for candidate in systemd openwrt openrc sysv busybox-rcs cron; do
+        if run_as_root grep -Fxq "NZ_KEEPALIVE_METHOD='$candidate'" "$metadata"; then
+            method="$candidate"
+            break
+        fi
+    done
+    [ -n "$method" ] || die "Could not identify the installation's service manager."
+
+    case "$method" in
+        systemd)
+            service_path="$NZ_SYSTEMD_DIR/nezha-agent.service"
+            assert_owned_service_file "$service_path" "ExecStart=$(systemd_quote_path "$KEEPALIVE_DIR/run.sh")"
+            run_as_root test -f "$service_path" || die "Cannot verify the systemd service; configuration was retained."
+            run_as_root systemctl stop nezha-agent.service || die "Could not stop systemd service."
+            run_as_root systemctl disable nezha-agent.service || die "Could not disable systemd service."
+            run_as_root rm -f "$service_path" || die "Could not remove systemd service."
+            run_as_root systemctl daemon-reload || die "Could not reload systemd."
+            ;;
+        openwrt)
+            service_path="$NZ_OPENWRT_INIT_DIR/nezha-agent"
+            assert_owned_service_file "$service_path" "    procd_set_param command $(shell_quote "$KEEPALIVE_DIR/run.sh")"
+            run_as_root test -f "$service_path" || die "Cannot verify the OpenWrt service; configuration was retained."
+            run_as_root "$service_path" stop || die "Could not stop OpenWrt service."
+            run_as_root "$service_path" disable || die "Could not disable OpenWrt service."
+            run_as_root rm -f "$service_path" || die "Could not remove OpenWrt service."
+            ;;
+        openrc)
+            service_path="$NZ_INIT_DIR/nezha-agent"
+            assert_owned_service_file "$service_path" "command=$(shell_quote "$KEEPALIVE_DIR/run.sh")"
+            run_as_root test -f "$service_path" || die "Cannot verify the OpenRC service; configuration was retained."
+            run_as_root rc-service nezha-agent stop || die "Could not stop OpenRC service."
+            run_as_root rc-update del nezha-agent default || die "Could not disable OpenRC service."
+            run_as_root rm -f "$service_path" || die "Could not remove OpenRC service."
+            ;;
+        sysv)
+            service_path="$NZ_INIT_DIR/nezha-agent"
+            assert_owned_service_file "$service_path" "SUPERVISOR=$(shell_quote "$KEEPALIVE_DIR/supervise.sh")"
+            run_as_root test -f "$service_path" || die "Cannot verify the SysV service; configuration was retained."
+            stop_supervisor || die "Could not stop SysV supervisor."
+            if has_cmd update-rc.d; then run_as_root update-rc.d -f nezha-agent remove || die "Could not disable SysV service."; fi
+            if has_cmd chkconfig; then run_as_root chkconfig nezha-agent off || die "Could not disable SysV service."; fi
+            run_as_root rm -f "$service_path" || die "Could not remove SysV service."
+            run_as_root rm -f /var/run/nezha-agent.pid || die "Could not remove SysV PID file."
+            ;;
+        busybox-rcs)
+            stop_supervisor || die "Could not stop BusyBox supervisor."
+            remove_busybox_rcs_hook
+            ;;
+        cron)
+            stop_supervisor || die "Could not stop cron supervisor."
+            remove_cron_entry root
+            if [ "$(id -u)" != 0 ]; then remove_cron_entry user; fi
+            ;;
+    esac
+    run_as_root rm -f "$KEEPALIVE_DIR/config.yml" "$metadata" \
+        "$KEEPALIVE_DIR/run.sh" "$KEEPALIVE_DIR/supervise.sh" ||
+        die "Could not remove installation files."
+    if [ "$STORAGE_MODE" = volatile ]; then
+        run_as_root rm -f "$INSTALL_BINARY_PATH" || die "Could not remove volatile binary."
+    fi
+    return 0
+}
+
 uninstall_agent() {
     found=0
-    remove_busybox_rcs_hook
-    for file in "$NZ_AGENT_PATH"/config*.yml; do
-        [ -f "$file" ] || continue
+    if run_as_root test -f "$NZ_VOLATILE_CONFIG_DIR/runtime.env"; then
+        KEEPALIVE_DIR="$NZ_VOLATILE_CONFIG_DIR"
+        if [ "$NZ_AGENT_PATH" = "$NZ_VOLATILE_CONFIG_DIR" ] &&
+            run_as_root grep -Fxq "NZ_STORAGE_MODE='persistent'" "$KEEPALIVE_DIR/runtime.env"; then
+            STORAGE_MODE=persistent
+            INSTALL_BINARY_PATH="$NZ_AGENT_PATH/nezha-agent"
+        else
+            STORAGE_MODE=volatile
+            INSTALL_BINARY_PATH="$NZ_VOLATILE_RUNTIME_DIR/nezha-agent"
+        fi
+        uninstall_runner_agent
         found=1
-        run_as_root "$NZ_AGENT_PATH/nezha-agent" service -c "$file" uninstall || true
-        run_as_root rm -f "$file" || true
+    fi
+    if [ "$NZ_AGENT_PATH" != "$NZ_VOLATILE_CONFIG_DIR" ] &&
+        run_as_root test -f "$NZ_AGENT_PATH/runtime.env"; then
+        STORAGE_MODE=persistent
+        KEEPALIVE_DIR="$NZ_AGENT_PATH"
+        INSTALL_BINARY_PATH="$NZ_AGENT_PATH/nezha-agent"
+        uninstall_runner_agent
+        found=1
+    fi
+    for file in "$NZ_AGENT_PATH"/config*.yml; do
+        run_as_root test -f "$file" || continue
+        found=1
+        unit="$(persistent_unit_name "$file")" || die "Could not determine service name for $file."
+        unit_path="$(persistent_unit_path "$unit")"
+        assert_owned_service_file "$unit_path" "$(persistent_unit_command "$file")"
+        run_as_root test -f "$unit_path" || die "Cannot verify the service for $file; configuration was retained."
+        run_as_root systemctl stop "$unit" || die "Could not stop $unit; configuration was retained."
+        run_as_root systemctl disable "$unit" || die "Could not disable $unit; configuration was retained."
+        run_as_root rm -f "$unit_path" || die "Could not remove $unit; configuration was retained."
+        run_as_root systemctl daemon-reload || die "Could not reload systemd; configuration was retained."
+        run_as_root rm -f "$file" || die "Could not remove $file."
     done
     [ "$found" = 1 ] || info "No installed configuration files were found."
     success "Uninstallation completed."
@@ -1513,17 +1899,20 @@ Optional environment variables:
   NZ_DISABLE_COMMAND_EXECUTE, NZ_SKIP_CONNECTION_COUNT
   NZ_FORCE_VOLATILE=1, NZ_NO_START=1, NZ_INIT_SYSTEM
   NZ_VOLATILE_CONFIG_DIR, NZ_VOLATILE_RUNTIME_DIR, NZ_BUSYBOX_RCS_PATH
+  NZ_INIT_DIR (OpenRC and SysV service directory; default /etc/init.d)
   TG_BOT_TOKEN, TG_CHAT_ID
 
 Command debug mode executes the trusted command through /bin/sh -c, sends its
 combined output and exit code to Telegram, and does not install Nezha Agent.
 
-If persistent storage cannot hold the verified binary, the installer keeps
-small configuration and runner files persistently, stores the binary under
-/tmp, and downloads plus verifies it automatically after every reboot.
+With NZ_FORCE_VOLATILE=1 or insufficient persistent space, the installer keeps
+configuration and runner files persistently, stores the binary under /tmp,
+and verifies or downloads it after every reboot. Otherwise the binary stays
+under NZ_AGENT_PATH, regardless of the detected init system.
 
-NZ_ARCH values: amd64, 386, arm5, arm6, arm64, mips, mipsle,
-                riscv64, s390x, loong64
+NZ_ARCH values: amd64, 386, arm5, arm6, armv7_softfloat,
+                armv7_hardfloat, arm64, mips, mipsle, mips64,
+                mips64le, ppc, ppc64, ppc64le, s390x
 EOF
         ;;
     '')

@@ -1353,6 +1353,15 @@ install_agent() {
         die "Nezha Agent service installation failed. See the log included in the Telegram notification."
     fi
 
+    # `service install` creates and enables the systemd unit but does not start it.
+    if ! run_as_root "$target_binary" service -c "$path" start >> "$LOG_FILE" 2>&1; then
+        run_as_root "$target_binary" service -c "$path" uninstall >/dev/null 2>&1 || true
+        if run_as_root test -f "$backup_binary"; then
+            run_as_root cp -f "$backup_binary" "$target_binary" || true
+        fi
+        die "Nezha Agent service start failed. See the log included in the Telegram notification."
+    fi
+
     success "Nezha Agent installed successfully."
     notify_result success
     rm -f "$LOG_FILE"

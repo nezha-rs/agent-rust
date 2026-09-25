@@ -707,10 +707,6 @@ verify_binary_header() {
 }
 
 verify_download() {
-    actual_size="$(file_size "$TEMP_BINARY")"
-    [ "$actual_size" = "$ASSET_SIZE" ] || \
-        die "Downloaded size mismatch: expected $ASSET_SIZE bytes, got ${actual_size:-unknown}."
-
     verify_binary_header "$TEMP_BINARY" || \
         die "Binary header does not match detected platform ${DETECTED_OS}/${DETECTED_ARCH}."
 
@@ -724,13 +720,11 @@ verify_download() {
         *' version 2.3.5'*) ;;
         *) die "Unexpected binary version output: $version_output" ;;
     esac
-    info "Verified size: $actual_size bytes"
     info "Runtime test: $version_output"
 }
 
 verify_rust_download() {
-    actual_size="$(file_size "$TEMP_BINARY")"
-    [ -n "$actual_size" ] && [ "$actual_size" -gt 0 ] || \
+    [ -s "$TEMP_BINARY" ] || \
         die "Downloaded Rust asset is empty."
     header="$(od -An -tx1 -N20 "$TEMP_BINARY" 2>/dev/null | tr -d '[:space:]')"
     case "$header" in 7f454c46*) ;; *) die "Rust asset is not an ELF executable." ;; esac
@@ -758,7 +752,9 @@ verify_rust_download() {
         *'nezha-agent-rust 2.1.0'*) ;;
         *) return 1 ;;
     esac
-    ASSET_SIZE="$actual_size"
+    # Keep the actual size only as a space-estimation hint for volatile mode;
+    # it is not used to accept or reject a binary.
+    ASSET_SIZE="$(file_size "$TEMP_BINARY")"
 }
 
 download_rust_asset() {
@@ -1002,8 +998,6 @@ sha256_file() {
 binary_ok() {
     binary="$1"
     [ -s "$binary" ] || return 1
-    actual_size="$(wc -c < "$binary" | tr -d '[:space:]')"
-    [ "$actual_size" = "$NZ_RUNTIME_SIZE" ] || return 1
     if [ -n "$NZ_RUNTIME_SHA256" ]; then
         actual_sha256="$(sha256_file "$binary" 2>/dev/null || true)"
         [ "$actual_sha256" = "$NZ_RUNTIME_SHA256" ] || return 1

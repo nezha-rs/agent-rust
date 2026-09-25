@@ -1073,7 +1073,7 @@ detect_keepalive_method() {
         esac
     elif [ -f /etc/openwrt_release ] || [ -x /sbin/procd ]; then
         printf '%s\n' openwrt
-    elif has_cmd systemctl && [ -d /etc/systemd/system ]; then
+    elif has_cmd systemctl && [ -d /etc/systemd/system ] && [ -d /run/systemd/system ]; then
         printf '%s\n' systemd
     elif has_cmd rc-service && has_cmd rc-update && [ -d /etc/init.d ]; then
         printf '%s\n' openrc
@@ -1260,6 +1260,10 @@ install_agent() {
 
     path="$(choose_config_path)"
     INSTALL_CONFIG_PATH="$path"
+    if ! run_as_root test -f "$path"; then
+        info "Creating config with supplied server credentials: $path"
+        write_volatile_config "$path"
+    fi
     run_as_root "$target_binary" service -c "$path" uninstall >/dev/null 2>&1 || true
 
     info "Installing service with config: $path"

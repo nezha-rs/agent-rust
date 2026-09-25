@@ -60,6 +60,8 @@ Release 配置启用 `opt-level=z`、fat LTO、单 codegen unit、符号剥离�
 
 CI 所用工具链和链接器不同，产物大小可能变化。
 
+OpenBSD ARMv5 的实验性静态构建使用 `scripts/build-openbsd-arm-lowisa.sh armv5` 和本地重建的 OpenBSD 7.7 ARMv5TE sysroot。当前产物已通过 ELF 静态链接、EABI5/soft-float、ARMv5TE 标签和链接检查，但尚未在 OpenBSD ARMv5 实机运行。其缺失的原子操作由单核系统上的全局 SWP 锁实现；若信号处理函数在同一线程持锁期间重入这些操作，可能自旋死锁。因此不能仅凭交叉编译和 ELF 检查认定运行兼容。
+
 PowerPC 静态版使用 WSL、nightly Rust（含 `rust-src`）和 Zig 0.13 构建：
 
 ```sh
@@ -69,6 +71,16 @@ ZIG=/path/to/zig bash scripts/build-powerpc-musl.sh
 该产物为 32 位大端 PowerPC ELF，无动态装载器和共享库依赖；已在 WSL 中用 QEMU 用户态执行 `--version` 和 `--help`。QEMU 使用宿主内核，尚不能证明它在目标 Fedora 16 / Linux 2.6.32 和 APM867xx 实机上可运行。
 
 ## 使用与配置
+
+### 一键安装
+
+`agent.sh` 从本项目的 `v2.1.0` Release 下载并校验静态二进制。每个架构优先使用对应的 `UPX-` 资产；Release 没有该资产，或压缩版下载后不能运行时，自动改用同架构原始 ELF。下载前会校验固定的 `SHA256SUMS.txt` 摘要，下载后还会检查 ELF 机器类型并执行 `--version`。
+
+```sh
+NZ_SERVER=dashboard.example:8008 NZ_CLIENT_SECRET=secret sh agent.sh
+```
+
+脚本支持 systemd、OpenWrt procd、OpenRC、SysV、cron，以及 BusyBox `init`。BusyBox `init` 若在 `rcS` 完成前不会处理 `respawn`，脚本会在 `rcS` 中安装一个幂等的后台启动钩子；它等待持久目录中的监护脚本出现，再由监护脚本负责重启 Agent。可用 `NZ_INIT_SYSTEM=busybox-rcs` 和 `NZ_BUSYBOX_RCS_PATH=/etc/init.d/rcS` 显式指定该模式。`sh agent.sh uninstall` 会移除服务、监护文件和它写入的 `rcS` 钩子。
 
 ```sh
 cargo build

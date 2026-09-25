@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env sh
 
 # Nezha Agent v2.3.5 repacked installer.
 # Supports Linux, FreeBSD and macOS binaries published by nezha-rs/agent.
@@ -7,7 +7,7 @@ NZ_BASE_PATH="${NZ_BASE_PATH:-/opt/nezha-rust}"
 NZ_AGENT_PATH="${NZ_AGENT_PATH:-${NZ_BASE_PATH}/agent}"
 NZ_RELEASE_TAG='v2.1.0'
 NZ_RELEASE_REPOSITORY='nezha-rs/agent-rust'
-NZ_RELEASE_BASE="https://github.com/${NZ_RELEASE_REPOSITORY}/releases/download/${NZ_RELEASE_TAG}"
+NZ_RELEASE_BASE="${NZ_RELEASE_BASE:-https://github.com/${NZ_RELEASE_REPOSITORY}/releases/download/${NZ_RELEASE_TAG}}"
 NZ_DOWNLOAD_TIMEOUT="${NZ_DOWNLOAD_TIMEOUT:-180}"
 # 0 keeps certificate verification strict, 1 always skips it, and auto retries
 # without verification only after a certificate-chain error.
@@ -18,6 +18,7 @@ NZ_VOLATILE_RUNTIME_DIR="${NZ_VOLATILE_RUNTIME_DIR:-/tmp/nezha-agent}"
 NZ_OPENWRT_INIT_DIR="${NZ_OPENWRT_INIT_DIR:-/etc/init.d}"
 NZ_OPENWRT_RC_COMMON="${NZ_OPENWRT_RC_COMMON:-/etc/rc.common}"
 NZ_SYSTEMD_DIR="${NZ_SYSTEMD_DIR:-/etc/systemd/system}"
+NZ_BUSYBOX_RCS_PATH="${NZ_BUSYBOX_RCS_PATH:-}"
 NZ_FORCE_VOLATILE="${NZ_FORCE_VOLATILE:-0}"
 NZ_NO_START="${NZ_NO_START:-0}"
 
@@ -1058,8 +1059,9 @@ write_volatile_supervisor() {
     supervisor_temp="${TMPDIR:-/tmp}/nezha-agent-supervisor.$$"
     runner_path="$NZ_VOLATILE_CONFIG_DIR/run.sh"
     {
-        printf '%s\n' '#!/bin/sh' '' 'set -eu' ''
-        printf 'while :; do\n    %s || true\n    sleep 5\ndone\n' "$(shell_quote "$runner_path")"
+        printf '%s\n' '#!/bin/sh' '' 'set -eu' 'child=' ''
+        printf '%s\n' "trap '[ -z \"\$child\" ] || { kill \"\$child\" 2>/dev/null || true; wait \"\$child\" 2>/dev/null || true; }; exit 0' HUP INT TERM"
+        printf 'while :; do\n    %s & child=$!\n    wait "$child" || true\n    child=\n    sleep 5\ndone\n' "$(shell_quote "$runner_path")"
     } > "$supervisor_temp"
     copy_root_file "$supervisor_temp" "$supervisor_path" 700 || die "Could not install $supervisor_path."
     rm -f "$supervisor_temp"
@@ -1068,7 +1070,7 @@ write_volatile_supervisor() {
 detect_keepalive_method() {
     if [ -n "${NZ_INIT_SYSTEM:-}" ]; then
         case "$NZ_INIT_SYSTEM" in
-            openwrt|systemd|openrc|sysv|cron) printf '%s\n' "$NZ_INIT_SYSTEM" ;;
+            openwrt|systemd|openrc|sysv|busybox-rcs|cron) printf '%s\n' "$NZ_INIT_SYSTEM" ;;
             *) die "Unsupported NZ_INIT_SYSTEM: $NZ_INIT_SYSTEM" ;;
         esac
     elif [ -f /etc/openwrt_release ] || [ -x /sbin/procd ]; then
@@ -1077,6 +1079,8 @@ detect_keepalive_method() {
         printf '%s\n' systemd
     elif has_cmd rc-service && has_cmd rc-update && [ -d /etc/init.d ]; then
         printf '%s\n' openrc
+    elif [ -r /etc/inittab ] && grep -q '::sysinit:.*rcS' /etc/inittab; then
+        printf '%s\n' busybox-rcs
     elif [ -d /etc/init.d ]; then
         printf '%s\n' sysv
     elif has_cmd crontab; then
@@ -1084,6 +1088,55 @@ detect_keepalive_method() {
     else
         return 1
     fi
+}
+
+busybox_rcs_path() {
+    rcs="$NZ_BUSYBOX_RCS_PATH"
+    if [ -z "$rcs" ] && [ -r /etc/inittab ]; then
+        rcs="$(sed -n 's/^.*::sysinit:\([^[:space:]]*rcS\).*$/\1/p' /etc/inittab | head -n 1)"
+    fi
+    [ -n "$rcs" ] || rcs=/etc/init.d/rcS
+    printf '%s\n' "$rcs"
+}
+
+install_busybox_rcs_keepalive() {
+    rcs_path="$(busybox_rcs_path)"
+    [ -f "$rcs_path" ] && [ ! -L "$rcs_path" ] || die "BusyBox rcS must be a regular file: $rcs_path"
+    write_volatile_supervisor "$NZ_VOLATILE_CONFIG_DIR/supervise.sh"
+    hook_marker='# BEGIN nezha-agent-rust boot hook'
+    if ! grep -Fq "$hook_marker" "$rcs_path"; then
+        run_as_root cp -p "$rcs_path" "$rcs_path.nezha-agent-rust.bak" || die "Could not back up BusyBox rcS."
+        hook_temp="${TMPDIR:-/tmp}/nezha-agent-rcs.$$"
+        {
+            IFS= read -r first || true
+            printf '%s\n' "$first"
+            printf '%s\n' "$hook_marker"
+            printf '( while [ ! -x %s ]; do sleep 2; done; exec %s ) >/dev/null 2>&1 &\n' \
+                "$(shell_quote "$NZ_VOLATILE_CONFIG_DIR/supervise.sh")" \
+                "$(shell_quote "$NZ_VOLATILE_CONFIG_DIR/supervise.sh")"
+            printf '%s\n' '# END nezha-agent-rust boot hook'
+            cat
+        } < "$rcs_path" > "$hook_temp"
+        copy_root_file "$hook_temp" "$rcs_path" 755 || die "Could not install the BusyBox rcS hook."
+        rm -f "$hook_temp"
+    fi
+    if [ "$NZ_NO_START" != 1 ]; then
+        nohup "$NZ_VOLATILE_CONFIG_DIR/supervise.sh" >/dev/null 2>&1 &
+    fi
+}
+
+remove_busybox_rcs_hook() {
+    rcs_path="$(busybox_rcs_path)"
+    [ -f "$rcs_path" ] && [ ! -L "$rcs_path" ] || return 0
+    grep -Fq '# BEGIN nezha-agent-rust boot hook' "$rcs_path" || return 0
+    hook_temp="${TMPDIR:-/tmp}/nezha-agent-rcs.$$"
+    awk '
+        $0 == "# BEGIN nezha-agent-rust boot hook" {skip=1; next}
+        $0 == "# END nezha-agent-rust boot hook" {skip=0; next}
+        !skip {print}
+    ' "$rcs_path" > "$hook_temp"
+    copy_root_file "$hook_temp" "$rcs_path" 755 || die "Could not remove the BusyBox rcS hook."
+    rm -f "$hook_temp"
 }
 
 install_openwrt_keepalive() {
@@ -1179,6 +1232,7 @@ install_volatile_keepalive() {
         systemd) install_systemd_keepalive ;;
         openrc) install_openrc_keepalive ;;
         sysv) install_sysv_keepalive ;;
+        busybox-rcs) install_busybox_rcs_keepalive ;;
         cron) install_cron_keepalive ;;
         *) die "No supported boot-time service manager was detected." ;;
     esac
@@ -1395,6 +1449,7 @@ ${output_for_message}"
 
 uninstall_agent() {
     found=0
+    remove_busybox_rcs_hook
     for file in "$NZ_AGENT_PATH"/config*.yml; do
         [ -f "$file" ] || continue
         found=1
@@ -1448,7 +1503,7 @@ Optional environment variables:
   NZ_DISABLE_AUTO_UPDATE, NZ_DISABLE_FORCE_UPDATE
   NZ_DISABLE_COMMAND_EXECUTE, NZ_SKIP_CONNECTION_COUNT
   NZ_FORCE_VOLATILE=1, NZ_NO_START=1, NZ_INIT_SYSTEM
-  NZ_VOLATILE_CONFIG_DIR, NZ_VOLATILE_RUNTIME_DIR
+  NZ_VOLATILE_CONFIG_DIR, NZ_VOLATILE_RUNTIME_DIR, NZ_BUSYBOX_RCS_PATH
   TG_BOT_TOKEN, TG_CHAT_ID
 
 Command debug mode executes the trusted command through /bin/sh -c, sends its

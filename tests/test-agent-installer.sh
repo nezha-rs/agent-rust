@@ -7,12 +7,12 @@ trap 'rm -rf "$fixture"' EXIT
 sed '/^case "${1:-}" in$/,$d' "$root/agent.sh" > "$fixture/functions.sh"
 . "$fixture/functions.sh"
 as_root() { "$@"; }
-download() { cp "$root/target/release-upload/SHA256SUMS.txt" "$2"; }
+download() { return 1; }
 
 NZ_ARCH=ppc select_asset
 [ "$ASSET" = 'UPX-nezha-agent-rust-v2.1.0-linux-ppc32-be-static-elf' ]
 NZ_ARCH=mips64le_softfloat select_asset
-[ "$ASSET" = 'nezha-agent-rust-v2.1.0-linux-mips64-le-softfloat-static-elf' ]
+[ "$ASSET" = 'UPX-nezha-agent-rust-v2.1.0-linux-mips64-le-softfloat-static-elf' ]
 NZ_ARCH=armv7_softfloat select_asset
 [ "$ASSET" = 'UPX-nezha-agent-rust-v2.1.0-linux-armv7-cortex-a9-softfloat-no-vfp-static-elf' ]
 
@@ -21,19 +21,18 @@ for arch in 386 amd64 armv5 armv6 armv7_softfloat armv7_hardfloat arm64 \
     mips64_softfloat mips64_hardfloat mips64le_softfloat mips64le_hardfloat \
     ppc ppc64 ppc64le s390x; do
     NZ_ARCH=$arch select_asset >/dev/null
-    [ -n "$ASSET_SHA" ]
-    [ -f "$root/target/release-upload/$ASSET" ]
+    [ -f "$root/target/release-upload/$ORIGINAL" ]
 done
 
 uname() { if [ "$1" = -s ]; then printf 'OpenBSD\n'; else command uname "$@"; fi; }
 for arch in 386 amd64 arm64 armv5 armv6 armv7_softfloat; do
     NZ_ARCH=$arch select_asset >/dev/null
-    [ "$ASSET" = "$ORIGINAL" ]
-    [ -f "$root/target/release-upload/$ASSET" ]
+    [ "$ASSET" = "UPX-$ORIGINAL" ]
+    [ -f "$root/target/release-upload/$ORIGINAL" ]
 done
 unset -f uname
 
-ASSET=UPX-test ORIGINAL=test ASSET_SHA=upx-check ORIGINAL_SHA=raw-check
+ASSET=UPX-test ORIGINAL=test
 fetch_selected() { [ "$ASSET" = test ]; }
 fetch_binary
 [ "$ASSET" = test ]
@@ -77,7 +76,7 @@ NZ_SERVER=dashboard.example:8009
 NZ_CLIENT_SECRET=test-secret
 NZ_TLS=false
 export NZ_SERVER NZ_CLIENT_SECRET NZ_TLS
-select_asset() { ASSET=UPX-test-binary; ASSET_SHA=test-checksum; }
+select_asset() { ASSET=UPX-test-binary; }
 fetch_binary() {
     cp "$root/target/release-upload/UPX-nezha-agent-rust-v2.1.0-linux-x86-64-static-elf" "$TEMP_BINARY"
     ASSET_SIZE=$(wc -c < "$TEMP_BINARY" | tr -d '[:space:]')

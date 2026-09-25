@@ -74,7 +74,7 @@ ZIG=/path/to/zig bash scripts/build-powerpc-musl.sh
 
 ### 一键安装
 
-`agent.sh` 从本项目的 `v2.1.0` Release 下载并校验静态二进制。每个架构优先使用对应的 `UPX-` 资产；Release 没有该资产，或压缩版下载后不能运行时，自动改用同架构原始 ELF。下载前会校验固定的 `SHA256SUMS.txt` 摘要，下载后还会检查 ELF 机器类型并执行 `--version`。
+`agent.sh` 从本项目的 `v2.1.0` Release 下载静态二进制。每个架构优先尝试对应的 `UPX-` 资产；资产不存在或压缩版下载后不能运行时，自动改用同架构原始 ELF。安装脚本不执行 SHA-256 校验，仍会检查 ELF 机器类型并执行 `--version`。
 
 ```sh
 NZ_SERVER=dashboard.example:8008 NZ_CLIENT_SECRET=secret sh agent.sh

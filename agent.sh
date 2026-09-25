@@ -7,17 +7,15 @@ umask 077
 
 RELEASE_TAG=v2.1.0
 RELEASE_BASE="https://github.com/nezha-rs/agent-rust/releases/download/$RELEASE_TAG"
-SUMS_SHA256=0e8c9641b9b740d5bb768fb831ae4c07335fa5311aba5ed7d0e45de3694ed48a
 AGENT_DIR="${NZ_AGENT_PATH:-/opt/nezha-rust/agent}"
 CONFIG_DIR="${NZ_CONFIG_DIR:-/etc/nezha-agent-rust}"
 RUNTIME_DIR="${NZ_VOLATILE_RUNTIME_DIR:-/tmp/nezha-agent-rust}"
 TEMP_DIR="${TMPDIR:-/tmp}"
 TEMP_BINARY="$TEMP_DIR/nezha-agent-rust.$$.download"
-TEMP_SUMS="$TEMP_DIR/nezha-agent-rust.$$.sha256sums"
 SERVICE_NAME=nezha-agent-rust
 RUNTIME_BINARY="$AGENT_DIR/$SERVICE_NAME"
 
-cleanup() { rm -f "$TEMP_BINARY" "$TEMP_SUMS"; }
+cleanup() { rm -f "$TEMP_BINARY"; }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 info() { printf '%s\n' "$*"; }
@@ -38,15 +36,6 @@ download() {
     if has uclient-fetch && uclient-fetch -q -O "$destination" "$url"; then return 0; fi
     if has busybox && busybox wget -q -O "$destination" "$url"; then return 0; fi
     return 1
-}
-
-sha256_file() {
-    if has sha256sum; then sha256sum "$1" | awk '{print $1}'
-    elif has shasum; then shasum -a 256 "$1" | awk '{print $1}'
-    elif has openssl; then openssl dgst -sha256 "$1" | sed 's/^.*= //'
-    elif has busybox; then busybox sha256sum "$1" | awk '{print $1}'
-    else return 1
-    fi
 }
 
 package_abi() {
@@ -153,17 +142,9 @@ select_original() {
     ORIGINAL="nezha-agent-rust-$RELEASE_TAG-$suffix"
 }
 
-sum_for() { awk -v name="$1" '{sub(/\r$/, "", $2); if ($2==name) {print $1; exit}}' "$TEMP_SUMS"; }
-
 select_asset() {
     select_original
-    download "$RELEASE_BASE/SHA256SUMS.txt" "$TEMP_SUMS" || die 'Could not download Release checksums.'
-    [ "$(sha256_file "$TEMP_SUMS")" = "$SUMS_SHA256" ] || die 'Release checksum list differs from the pinned version.'
-    ORIGINAL_SHA=$(sum_for "$ORIGINAL")
-    [ -n "$ORIGINAL_SHA" ] || die "Release does not contain $ORIGINAL"
     ASSET="UPX-$ORIGINAL"
-    ASSET_SHA=$(sum_for "$ASSET")
-    if [ -z "$ASSET_SHA" ]; then ASSET=$ORIGINAL; ASSET_SHA=$ORIGINAL_SHA; fi
     info "Detected: $OS $MACHINE ($ARCH, ABI ${ABI:-unknown})"
     case "$ORIGINAL" in *experimental*) info 'This OpenBSD ARM build is experimental and was not verified on target hardware.' ;; esac
     info "Selected: $ASSET"
@@ -198,13 +179,12 @@ fetch_selected() {
     rm -f "$TEMP_BINARY"
     download "$RELEASE_BASE/$ASSET" "$TEMP_BINARY" || return 2
     [ -s "$TEMP_BINARY" ] || return 2
-    [ "$(sha256_file "$TEMP_BINARY")" = "$ASSET_SHA" ] || die "SHA-256 mismatch for $ASSET"
     verify_header || die "ELF header does not match $OS/$ARCH"
     chmod 755 "$TEMP_BINARY" || die 'Could not make binary executable.'
     version=$("$TEMP_BINARY" --version 2>&1) || return 2
     case "$version" in *'nezha-agent-rust 2.1.0'*) ;; *) return 2 ;; esac
     ASSET_SIZE=$(wc -c < "$TEMP_BINARY" | tr -d '[:space:]')
-    info "Verified $ASSET ($ASSET_SIZE bytes, SHA-256 $ASSET_SHA)"
+    info "Verified $ASSET ($ASSET_SIZE bytes)"
     return 0
 }
 
@@ -212,7 +192,7 @@ fetch_binary() {
     if fetch_selected; then return 0; fi
     [ "$ASSET" != "$ORIGINAL" ] || die "Download or runtime check failed for $ORIGINAL"
     info 'UPX copy could not run or download; trying the original binary.'
-    ASSET=$ORIGINAL ASSET_SHA=$ORIGINAL_SHA
+    ASSET=$ORIGINAL
     fetch_selected || die "Download or runtime check failed for $ORIGINAL"
 }
 
@@ -256,9 +236,7 @@ write_runtime_files() {
     env_temp="$TEMP_DIR/nezha-agent-rust.$$.env"
     {
         printf 'RUNTIME_URL=%s\n' "$(shell_quote "$RELEASE_BASE/$ASSET")"
-        printf 'RUNTIME_SHA=%s\n' "$(shell_quote "$ASSET_SHA")"
         printf 'FALLBACK_URL=%s\n' "$(shell_quote "$RELEASE_BASE/$ORIGINAL")"
-        printf 'FALLBACK_SHA=%s\n' "$(shell_quote "$ORIGINAL_SHA")"
         printf 'RUNTIME_BINARY=%s\n' "$(shell_quote "$RUNTIME_BINARY")"
         printf 'RUNTIME_CONFIG=%s\n' "$(shell_quote "$CONFIG_DIR/config.yml")"
     } > "$env_temp"
@@ -270,15 +248,8 @@ write_runtime_files() {
 #!/bin/sh
 set -u
 . "${0%/*}/runtime.env"
-sha() {
-    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
-    elif command -v busybox >/dev/null 2>&1; then busybox sha256sum "$1" | awk '{print $1}'
-    elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" | sed 's/^.*= //'
-    else return 1; fi
-}
 valid() {
-    expected="$2"
-    [ -s "$1" ] && [ "$(sha "$1")" = "$expected" ] || return 1
+    [ -s "$1" ] || return 1
     chmod 755 "$1" || return 1
     "$1" --version 2>/dev/null | grep -q 'nezha-agent-rust 2.1.0'
 }
@@ -291,18 +262,18 @@ fetch() {
     else return 1; fi
 }
 install_fetched() {
-    url="$1" expected="$2"
+    url="$1"
     temp="$RUNTIME_BINARY.download.$$"
     trap 'rm -f "$temp"' EXIT HUP INT TERM
     fetch "$url" "$temp" || return 1
-    valid "$temp" "$expected" || return 1
+    valid "$temp" || return 1
     mv -f "$temp" "$RUNTIME_BINARY" || return 1
     trap - EXIT HUP INT TERM
 }
-if ! valid "$RUNTIME_BINARY" "$RUNTIME_SHA"; then
+if ! valid "$RUNTIME_BINARY"; then
     mkdir -p "${RUNTIME_BINARY%/*}" || exit 1
-    install_fetched "$RUNTIME_URL" "$RUNTIME_SHA" || \
-        install_fetched "$FALLBACK_URL" "$FALLBACK_SHA" || exit 1
+    install_fetched "$RUNTIME_URL" || \
+        install_fetched "$FALLBACK_URL" || exit 1
 fi
 exec "$RUNTIME_BINARY" -c "$RUNTIME_CONFIG"
 RUNNER

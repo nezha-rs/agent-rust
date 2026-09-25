@@ -82,6 +82,8 @@ NZ_SERVER=dashboard.example:8008 NZ_CLIENT_SECRET=secret sh agent.sh
 
 脚本支持 systemd、OpenWrt procd、OpenRC、SysV、cron，以及 BusyBox `init`。BusyBox `init` 若在 `rcS` 完成前不会处理 `respawn`，脚本会在 `rcS` 中安装一个幂等的后台启动钩子；它等待持久目录中的监护脚本出现，再由监护脚本负责重启 Agent。可用 `NZ_INIT_SYSTEM=busybox-rcs` 和 `NZ_BUSYBOX_RCS_PATH=/etc/init.d/rcS` 显式指定该模式。`sh agent.sh uninstall` 会移除服务、监护文件和它写入的 `rcS` 钩子。
 
+脚本首行通过 `/usr/bin/env sh` 查找 shell，兼容 `sh` 不位于 `/bin/sh` 的系统；若系统连 `/usr/bin/env` 也没有，请使用系统提供的 shell 直接执行 `sh agent.sh`。
+
 ```sh
 cargo build
 NZ_SERVER=dashboard.example:8008 NZ_CLIENT_SECRET=your-secret cargo run

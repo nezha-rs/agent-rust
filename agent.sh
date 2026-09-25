@@ -9,7 +9,9 @@ NZ_RELEASE_TAG='v2.1.0'
 NZ_RELEASE_REPOSITORY='nezha-rs/agent-rust'
 NZ_RELEASE_BASE="https://github.com/${NZ_RELEASE_REPOSITORY}/releases/download/${NZ_RELEASE_TAG}"
 NZ_DOWNLOAD_TIMEOUT="${NZ_DOWNLOAD_TIMEOUT:-180}"
-NZ_INSECURE_TLS="${NZ_INSECURE_TLS:-0}"
+# 0 keeps certificate verification strict, 1 always skips it, and auto retries
+# without verification only after a certificate-chain error.
+NZ_INSECURE_TLS="${NZ_INSECURE_TLS:-auto}"
 CPUINFO_PATH="${NZ_CPUINFO_PATH:-/proc/cpuinfo}"
 NZ_VOLATILE_CONFIG_DIR="${NZ_VOLATILE_CONFIG_DIR:-/etc/nezha-agent}"
 NZ_VOLATILE_RUNTIME_DIR="${NZ_VOLATILE_RUNTIME_DIR:-/tmp/nezha-agent}"
@@ -75,6 +77,17 @@ run_as_root() {
     fi
 }
 
+tls_certificate_error() {
+    log_path="$1"
+    tail -n 40 "$log_path" 2>/dev/null | grep -Eiq \
+        'certificate|issuer|unknown ca|verify failed|unable to verify|unable to get local issuer|self-signed|x509'
+}
+
+auto_insecure_tls() {
+    [ "$NZ_INSECURE_TLS" = auto ] || return 1
+    tls_certificate_error "$LOG_FILE"
+}
+
 download_to() {
     url="$1"
     destination="$2"
@@ -88,6 +101,13 @@ download_to() {
         [ "$NZ_INSECURE_TLS" = 1 ] && curl_args="$curl_args --insecure"
         curl $curl_args \
             --retry 3 --retry-delay 2 -o "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
+        if auto_insecure_tls; then
+            append_log "WARN: certificate verification failed; retrying curl without certificate verification"
+            rm -f "$destination"
+            curl_args="-fL --connect-timeout 20 --max-time $NZ_DOWNLOAD_TIMEOUT --insecure"
+            curl $curl_args \
+                --retry 3 --retry-delay 2 -o "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
+        fi
         append_log "WARN: curl download failed; trying another available client"
     fi
     if has_cmd wget; then
@@ -99,6 +119,11 @@ download_to() {
         else
             wget -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
         fi
+        if auto_insecure_tls; then
+            append_log "WARN: certificate verification failed; retrying wget without certificate verification"
+            rm -f "$destination"
+            wget --no-check-certificate -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
+        fi
         append_log "WARN: wget download failed; trying another available client"
     fi
     if has_cmd uclient-fetch; then
@@ -106,6 +131,11 @@ download_to() {
         DOWNLOAD_TOOL="uclient-fetch"
         rm -f "$destination"
         uclient-fetch -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
+        if auto_insecure_tls; then
+            append_log "WARN: certificate verification failed; retrying uclient-fetch without certificate verification"
+            rm -f "$destination"
+            uclient-fetch --no-check-certificate -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
+        fi
         append_log "WARN: uclient-fetch download failed; trying BusyBox wget"
     fi
     if has_cmd busybox && busybox wget --help >/dev/null 2>&1; then
@@ -113,6 +143,11 @@ download_to() {
         DOWNLOAD_TOOL="busybox wget"
         rm -f "$destination"
         busybox wget -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
+        if auto_insecure_tls && busybox wget --help 2>&1 | grep -q -- '--no-check-certificate'; then
+            append_log "WARN: certificate verification failed; retrying BusyBox wget without certificate verification"
+            rm -f "$destination"
+            busybox wget --no-check-certificate -O "$destination" "$url" >> "$LOG_FILE" 2>&1 && return 0
+        fi
     fi
     if [ "$client_found" = 0 ]; then
         err "A download tool is required: curl, wget, uclient-fetch, or BusyBox wget."
@@ -869,10 +904,23 @@ has_cmd() {
     command -v "$1" >/dev/null 2>&1
 }
 
+tls_certificate_error() {
+    log_path="$1"
+    tail -n 40 "$log_path" 2>/dev/null | grep -Eiq \
+        'certificate|issuer|unknown ca|verify failed|unable to verify|unable to get local issuer|self-signed|x509'
+}
+
+auto_insecure_tls() {
+    [ "$NZ_RUNTIME_INSECURE_TLS" = auto ] || return 1
+    tls_certificate_error "$1"
+}
+
 download_to() {
     url="$1"
     destination="$2"
     found=0
+    download_log="${destination}.log"
+    rm -f "$download_log"
 
     if has_cmd curl; then
         found=1
@@ -880,27 +928,58 @@ download_to() {
         curl_args="-fL --connect-timeout 20 --max-time $NZ_RUNTIME_DOWNLOAD_TIMEOUT"
         [ "$NZ_RUNTIME_INSECURE_TLS" = 1 ] && curl_args="$curl_args --insecure"
         curl $curl_args \
-            --retry 3 --retry-delay 2 -o "$destination" "$url" && return 0
+            --retry 3 --retry-delay 2 -o "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
+        cat "$download_log" >&2
+        if auto_insecure_tls "$download_log"; then
+            echo 'certificate verification failed; retrying curl without certificate verification' >&2
+            rm -f "$destination"
+            curl_args="-fL --connect-timeout 20 --max-time $NZ_RUNTIME_DOWNLOAD_TIMEOUT --insecure"
+            curl $curl_args \
+                --retry 3 --retry-delay 2 -o "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
+            cat "$download_log" >&2
+        fi
     fi
     if has_cmd wget; then
         found=1
         rm -f "$destination"
         if [ "$NZ_RUNTIME_INSECURE_TLS" = 1 ]; then
-            wget --no-check-certificate -O "$destination" "$url" && return 0
+            wget --no-check-certificate -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
         else
-            wget -O "$destination" "$url" && return 0
+            wget -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
+        fi
+        cat "$download_log" >&2
+        if auto_insecure_tls "$download_log"; then
+            echo 'certificate verification failed; retrying wget without certificate verification' >&2
+            rm -f "$destination"
+            wget --no-check-certificate -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
+            cat "$download_log" >&2
         fi
     fi
     if has_cmd uclient-fetch; then
         found=1
         rm -f "$destination"
-        uclient-fetch -O "$destination" "$url" && return 0
+        uclient-fetch -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
+        cat "$download_log" >&2
+        if auto_insecure_tls "$download_log"; then
+            echo 'certificate verification failed; retrying uclient-fetch without certificate verification' >&2
+            rm -f "$destination"
+            uclient-fetch --no-check-certificate -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
+            cat "$download_log" >&2
+        fi
     fi
     if has_cmd busybox && busybox wget --help >/dev/null 2>&1; then
         found=1
         rm -f "$destination"
-        busybox wget -O "$destination" "$url" && return 0
+        busybox wget -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
+        cat "$download_log" >&2
+        if auto_insecure_tls "$download_log" && busybox wget --help 2>&1 | grep -q -- '--no-check-certificate'; then
+            echo 'certificate verification failed; retrying BusyBox wget without certificate verification' >&2
+            rm -f "$destination"
+            busybox wget --no-check-certificate -O "$destination" "$url" >> "$download_log" 2>&1 && { rm -f "$download_log"; return 0; }
+            cat "$download_log" >&2
+        fi
     fi
+    rm -f "$download_log"
     [ "$found" -ne 0 ] || echo 'curl, wget, uclient-fetch, or BusyBox wget is required' >&2
     return 1
 }

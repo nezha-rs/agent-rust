@@ -680,10 +680,22 @@ sha256_file() {
     fi
 }
 
+elf_header_hex() {
+    input_file="$1"
+    if has_cmd od; then
+        od -An -tx1 -N20 "$input_file" 2>/dev/null |
+            awk '{for (i = 1; i <= NF; i++) { if (length($i) == 1) printf "0%s", $i; else printf "%s", $i }}'
+    elif has_cmd hexdump; then
+        hexdump -C -n 20 "$input_file" 2>/dev/null |
+            awk '{for (i = 2; i <= NF; i++) if ($i ~ /^[0-9A-Fa-f][0-9A-Fa-f]$/) printf "%s", $i}'
+    else
+        return 1
+    fi
+}
+
 verify_binary_header() {
     file="$1"
-    has_cmd od || return 0
-    header="$(od -An -tx1 -N20 "$file" 2>/dev/null | tr -d ' \n')"
+    header="$(elf_header_hex "$file" 2>/dev/null)" || return 0
 
     case "$DETECTED_OS" in
         linux|freebsd)
@@ -733,7 +745,7 @@ verify_download() {
 
 verify_rust_download() {
     [ -s "$TEMP_BINARY" ] || return 1
-    header="$(od -An -tx1 -N20 "$TEMP_BINARY" 2>/dev/null | tr -d '[:space:]')"
+    header="$(elf_header_hex "$TEMP_BINARY" 2>/dev/null)" || return 1
     case "$header" in 7f454c46*) ;; *) return 1 ;; esac
     class="$(printf '%s' "$header" | cut -c9-10)"
     data="$(printf '%s' "$header" | cut -c11-12)"
